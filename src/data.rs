@@ -52,10 +52,6 @@ pub fn load() -> Vec<Body> {
     file.body
 }
 
-pub const EARTH_MAP: &[u8] = include_bytes!("../assets/earth_128x64.rgb");
-pub const EARTH_MAP_W: usize = 128;
-pub const EARTH_MAP_H: usize = 64;
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -65,9 +61,5 @@ mod tests {
         assert_eq!(b[0].id, "sun");
         assert_eq!(b[3].id, "earth");
         assert!(b.iter().all(|x| x.facts.len() >= 3));
-        assert_eq!(
-            super::EARTH_MAP.len(),
-            super::EARTH_MAP_W * super::EARTH_MAP_H * 3
-        );
     }
 }

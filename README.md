@@ -18,10 +18,10 @@
 - **HD planets.** In terminals that speak the kitty graphics protocol (Ghostty, kitty and WezTerm on Linux and macOS; Konsole with `--graphics kitty`), the Sun, planets and rings are drawn as real anti-aliased images with true transparency. The text layer still carries the orbits, stars, labels and panels, so it stays a terminal app. Every other terminal gets a carefully tuned text renderer instead.
 - **The real sky, right now.** Planet positions come from NASA JPL orbital elements for the current date, and they match JPL Horizons to within 0.15 degrees. Each planet's spin axis comes from the IAU, so Saturn's rings tilt the way they really do.
 - **Time travel.** Run time from real time up to 10 years per second, forwards or backwards, or jump to any date from the year 1000 to 3000: `--date 1969-07-20`.
-- **Fly to any world.** Press <kbd>Enter</kbd> and the camera glides in close, lit by the Sun from its true direction.
-  - **Earth** uses NASA's Blue Marble map with drifting clouds, and it turns with real sidereal time. Africa faces the Sun at noon in Africa.
-  - **Jupiter** has its belts, zones and the Great Red Spot.
-  - **Saturn** has its C, B and A rings, the Cassini division, and shadows cast in both directions.
+- **Fly to any world.** Press <kbd>Enter</kbd> and the camera glides in close, lit by the Sun from its true direction. Every body wears a real surface map from spacecraft data.
+  - **Earth** uses NASA's Blue Marble with drifting clouds, city lights on the night side and sun glint on the oceans. It turns with real sidereal time, so Africa faces the Sun at noon in Africa.
+  - **Saturn** has a ring profile from Cassini data: the C, B and A rings, the Cassini division and the Encke gap, with shadows cast in both directions.
+  - **The Sun** turns, its surface boils, and its limb darkens beneath a soft corona.
 - **Live data panel.** It shows the distance from the Sun and from Earth, light travel time, orbital speed, how far through its orbit a planet is, and the physical profile from NASA's fact sheet. A rotating close-up of the selected planet sits on top, and "Did you know?" facts type themselves out.
 - **Always in motion.** The camera slowly circles. Asteroid-belt and Kuiper-belt particles orbit at their real Keplerian speeds. The Sun's corona flickers, stars twinkle, and the Milky Way sits where it belongs in the sky.
 - **Mouse and keyboard.** Drag to rotate, scroll to zoom, click a planet to select it, and click it again to fly there.
@@ -141,7 +141,7 @@ cosmoscope --no-panel --no-rotate
 - **For the best picture, use a terminal with the kitty graphics protocol.** Good choices are [Ghostty](https://ghostty.org), [kitty](https://sw.kovidgoyal.net/kitty/) or [WezTerm](https://wezfurlong.org/wezterm/), on Linux or macOS. HD switches on automatically, and the status bar shows **HD**. Inside tmux or screen, images do not pass through, so cosmoscope falls back to text.
   - Ubuntu: `sudo snap install ghostty --classic`
   - macOS: `brew install --cask ghostty`
-- **HD needs a little more power.** It uses about one CPU core and a few MB/s of terminal bandwidth. Over SSH, use `--graphics off` or a lower `--fps`.
+- **HD needs a little more power.** It uses about half a CPU core, plus some work in the terminal itself. On a local machine, images go through temporary files that the terminal reads directly. Over SSH they are sent inline, so use `--graphics off` or a lower `--fps` on slow links.
 - **Fonts.** Bodies are drawn with half blocks (`▀▄`) and orbits with braille dots (`⣿`). Any modern monospace font has them: JetBrains Mono, Cascadia Code, Fira Code, DejaVu Sans Mono, SF Mono, Menlo or Nerd Fonts.
 - **Colour.** Most terminals get 24-bit colour automatically, including GNOME Terminal, Konsole, kitty, Alacritty, WezTerm, Ghostty, iTerm2 and Windows Terminal. macOS Terminal.app gets the 256-colour fallback. Inside tmux, either enable RGB (`set -as terminal-features ",*:RGB"`) or run with `--colors truecolor`.
 - **Size.** It works from 80×24 upwards, and it looks best at 120×40 or larger with a small font.
@@ -175,14 +175,16 @@ src/
   app.rs         state: time, selection, camera, tour, input
   render.rs      software renderer: shared body shading, text back end (block/quadrant glyphs,
                  braille orbits, sky) and HD back end (anti-aliased RGBA sprites)
-  kitty.rs       kitty graphics protocol output: chunked zlib images, double-buffered ids
+  kitty.rs       kitty graphics protocol: images moved to the pixel every frame, redrawn only
+                 when they change, sent through temp files locally (zlib + base64 over SSH)
   ui.rs          ratatui layout: info panel, status bar, help
   ephemeris.rs   JPL orbital elements and Kepler's equation (with Horizons tests)
   time.rs        Julian dates and calendar conversion
   data.rs        body data loader
+  textures.rs    embedded surface maps, decoded once on a background thread
 assets/
   bodies.toml    physical data, pole directions and facts for each body
-  earth_128x64.rgb   NASA Blue Marble, downsampled
+  textures/      surface maps (JPEG) and Saturn's ring profile
 tools/           screenshot/GIF generators and a kitty-protocol compositor (Python + Pillow)
 ```
 
@@ -190,11 +192,12 @@ tools/           screenshot/GIF generators and a kitty-protocol compositor (Pyth
 
 - Orbital elements: E. M. Standish, JPL Solar System Dynamics. Test vectors come from [JPL Horizons](https://ssd.jpl.nasa.gov/horizons/).
 - Physical data: [NASA Planetary Fact Sheet](https://nssdc.gsfc.nasa.gov/planetary/factsheet/).
+- Surface maps of the Sun, Mercury, Venus, Mars, Jupiter, Saturn, Uranus and Neptune, Earth's night lights and clouds, and Saturn's ring profile: [Solar System Scope](https://www.solarsystemscope.com/textures/), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), based on NASA mission data. They are downsampled to 1024×512 in `assets/textures`.
 - Pole directions: IAU Working Group on Cartographic Coordinates and Rotational Elements (2015).
-- Earth texture: [NASA Visible Earth, Blue Marble](https://visibleearth.nasa.gov/) (public domain).
+- Earth's day side: [NASA Visible Earth, Blue Marble](https://visibleearth.nasa.gov/) (public domain).
 - Built with [ratatui](https://ratatui.rs) and [crossterm](https://github.com/crossterm-rs/crossterm).
 - Sibling project: [saturn](https://github.com/phanminhtai1029/saturn), an animated ASCII Saturn.
 
 ## License
 
-[MIT](LICENSE). NASA imagery and data are in the public domain.
+Code: [MIT](LICENSE). NASA imagery and data are in the public domain. The Solar System Scope maps in `assets/textures` are CC BY 4.0, so keep their credit when you redistribute them.

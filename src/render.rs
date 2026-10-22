@@ -4,9 +4,10 @@
 //! for orbits and small particles, and plain glyphs for the sky. Empty cells keep the
 //! terminal's own background, so transparent terminals stay transparent.
 
-use crate::data::{Body, EARTH_MAP, EARTH_MAP_H, EARTH_MAP_W};
+use crate::data::Body;
 use crate::ephemeris;
 use crate::math::{fbm, hashf, smoothstep, vnoise, Rgb, TAU, V3};
+use crate::textures;
 use crate::time::J2000;
 
 /// Final content of one terminal cell.
@@ -357,34 +358,13 @@ pub fn has_rings(id: &str) -> bool {
     matches!(id, "saturn" | "uranus")
 }
 
-/// Ring structure in planet radii: (optical depth, albedo, colour).
+/// Ring structure in planet radii: (normal optical depth, albedo, colour).
 fn ring_at(id: &str, r: f64) -> Option<(f64, f64, Rgb)> {
     match id {
         "saturn" => {
-            if !(1.24..=2.27).contains(&r) {
-                return None;
-            }
-            let fine = vnoise(r * 18.0, 0.5, 0.5) * 0.6 + vnoise(r * 45.0, 1.5, 0.5) * 0.4;
-            Some(if r < 1.53 {
-                (0.10 * (0.5 + fine), 0.45, Rgb::hex(0x8a7d6c))
-            } else if r < 1.95 {
-                let inner = smoothstep(1.53, 1.65, r);
-                (
-                    (0.4 + 1.4 * inner) * (0.8 + 0.4 * fine),
-                    (0.55 + 0.4 * inner) * (0.85 + 0.3 * fine),
-                    Rgb::hex(0xe0d0ae).mix(Rgb::hex(0xf2e6c8), fine),
-                )
-            } else if r < 2.03 {
-                (0.06, 0.35, Rgb::hex(0x5a5248))
-            } else if (2.205..2.215).contains(&r) {
-                (0.01, 0.3, Rgb::hex(0x5a5248))
-            } else {
-                (
-                    0.55 * (0.75 + 0.5 * fine),
-                    0.7 * (0.85 + 0.3 * fine),
-                    Rgb::hex(0xc8b898),
-                )
-            })
+            // Cassini-based ring profile: face-on opacity turned into optical depth
+            let (col, alpha) = textures::saturn_ring(r)?;
+            Some((-(1.0 - alpha.min(0.97)).ln(), 1.0, col))
         }
         "uranus" => {
             const RINGLETS: [f64; 4] = [1.67, 1.75, 1.84, 2.00];
@@ -398,90 +378,30 @@ fn ring_at(id: &str, r: f64) -> Option<(f64, f64, Rgb)> {
     }
 }
 
-fn earth_map(lon: f64, lat: f64) -> Rgb {
-    let u = ((lon / TAU + 0.5).rem_euclid(1.0)) * EARTH_MAP_W as f64 - 0.5;
-    let v = ((0.5 - lat / std::f64::consts::PI).clamp(0.0, 0.9999)) * EARTH_MAP_H as f64 - 0.5;
-    let (x0, y0) = (u.floor(), v.floor().max(0.0));
-    let (fx, fy) = (u - x0, (v - y0).clamp(0.0, 1.0));
-    let at = |x: f64, y: f64| {
-        let xi = (x as i64).rem_euclid(EARTH_MAP_W as i64) as usize;
-        let yi = (y as usize).min(EARTH_MAP_H - 1);
-        let k = (yi * EARTH_MAP_W + xi) * 3;
-        Rgb::new(
-            EARTH_MAP[k] as f64 / 255.0,
-            EARTH_MAP[k + 1] as f64 / 255.0,
-            EARTH_MAP[k + 2] as f64 / 255.0,
-        )
-    };
-    let top = at(x0, y0).mix(at(x0 + 1.0, y0), fx);
-    let bot = at(x0, y0 + 1.0).mix(at(x0 + 1.0, y0 + 1.0), fx);
-    top.mix(bot, fy)
+fn lon_lat(n: V3) -> (f64, f64) {
+    (n.y.atan2(n.x), n.z.clamp(-1.0, 1.0).asin())
 }
 
-/// Surface colour at body-fixed unit vector `n` (z = north pole).
+/// Fraction of Earth's sky covered by cloud at a point; the layer drifts slowly eastwards.
+fn earth_clouds(lon: f64, lat: f64, t: f64) -> f64 {
+    // the map is very cloudy; thin it so the continents show through
+    textures::earth_clouds()
+        .sample(lon - t * 0.004, lat)
+        .r
+        .powf(1.7)
+        * 0.85
+}
+
+/// Surface colour at body-fixed unit vector `n` (z = north pole), from the real maps.
 fn surface(id: &str, n: V3, t: f64) -> Rgb {
-    let lat = n.z.clamp(-1.0, 1.0).asin();
-    let lon = n.y.atan2(n.x);
+    let (lon, lat) = lon_lat(n);
     match id {
-        "mercury" => {
-            let craters = fbm(n * 7.0, 4);
-            Rgb::hex(0x8f857c).mix(Rgb::hex(0xc4bbb2), craters * 1.4 - 0.3)
-        }
-        "venus" => {
-            let swirl = fbm(V3::new(lon * 0.8 + lat * 2.0, lat * 5.0, t * 0.01), 3);
-            Rgb::hex(0xd8b878).mix(Rgb::hex(0xf6e7c0), swirl)
-        }
-        "earth" => {
-            // the Blue Marble oceans are very dark; lift them so Earth reads as blue at any size
-            let g = earth_map(lon, lat);
-            let water = smoothstep(0.05, 0.12, g.b - g.r.max(g.g) * 0.8);
-            let ground = Rgb::new(g.r.powf(0.8), g.g.powf(0.8), g.b.powf(0.8))
-                .mix(Rgb::hex(0x2a5fc8), water * 0.55);
-            let clouds = fbm(V3::new(n.x * 3.0 + t * 0.004, n.y * 3.0, n.z * 5.0), 4);
-            ground.mix(Rgb::hex(0xf4f6fb), smoothstep(0.55, 0.75, clouds) * 0.85)
-        }
-        "mars" => {
-            let dark = fbm(n * 3.0, 4);
-            let base = Rgb::hex(0xd0663e).mix(Rgb::hex(0x7a3a24), smoothstep(0.5, 0.7, dark));
-            base.mix(Rgb::hex(0xf2eee8), smoothstep(0.88, 0.93, n.z.abs()))
-        }
-        "jupiter" => {
-            let turb = fbm(V3::new(lon * 1.6, lat * 9.0, 1.0), 4);
-            let band = (lat * 13.0 + turb * 1.6).sin();
-            let mut c = Rgb::hex(0xb8875c).mix(Rgb::hex(0xefe2c4), band * 0.5 + 0.5);
-            c = c.mix(Rgb::hex(0x8a5c3c), smoothstep(0.75, 0.95, -band) * 0.5);
-            // Great Red Spot near 22 degrees south
-            let (dl, dp) = (
-                (lon - 1.0 + TAU / 2.0).rem_euclid(TAU) - TAU / 2.0,
-                lat + 0.38,
-            );
-            let spot = (dl / 0.32).powi(2) + (dp / 0.11).powi(2);
-            c.mix(Rgb::hex(0xc85a40), 1.0 - smoothstep(0.6, 1.0, spot))
-        }
-        "saturn" => {
-            let turb = fbm(V3::new(lon * 1.2, lat * 7.0, 3.0), 3);
-            let band = (lat * 10.0 + turb).sin();
-            Rgb::hex(0xd6bd86).mix(Rgb::hex(0xf2e3b8), band * 0.5 + 0.5)
-        }
-        "uranus" => {
-            let band = (lat * 6.0).sin() * 0.5 + 0.5;
-            Rgb::hex(0x9adfe4).mix(Rgb::hex(0xb8eef0), band * 0.4)
-        }
-        "neptune" => {
-            let turb = fbm(V3::new(lon * 2.0, lat * 8.0, 5.0), 3);
-            let mut c =
-                Rgb::hex(0x3f5fd8).mix(Rgb::hex(0x6688f2), ((lat * 9.0 + turb).sin()) * 0.5 + 0.5);
-            let (dl, dp) = (
-                (lon + 0.6 + TAU / 2.0).rem_euclid(TAU) - TAU / 2.0,
-                lat + 0.35,
-            );
-            c = c.mix(
-                Rgb::hex(0x22337a),
-                1.0 - smoothstep(0.5, 1.0, (dl / 0.3).powi(2) + (dp / 0.12).powi(2)),
-            );
-            c.mix(Rgb::WHITE, smoothstep(0.72, 0.8, turb) * 0.7)
-        }
-        _ => Rgb::WHITE,
+        "earth" => textures::earth_day()
+            .sample(lon, lat)
+            .mix(Rgb::hex(0xf4f6fb), earth_clouds(lon, lat, t)),
+        // Venus' cloud tops circle the planet in about four days: let them drift
+        "venus" => textures::venus().sample(lon + t * 0.02, lat),
+        _ => textures::for_body(id).map_or(Rgb::WHITE, |m| m.sample(lon, lat)),
     }
 }
 
@@ -549,13 +469,11 @@ pub struct Frame<'a> {
     pub sent: Option<&'a std::collections::HashMap<u32, Sent>>,
 }
 
-/// Cell box of an image slot and when it was last redrawn.
+/// Size of an image slot's last picture and when it was drawn.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sent {
-    pub col: i64,
-    pub row: i64,
-    pub cols: u32,
-    pub rows: u32,
+    pub w: u32,
+    pub h: u32,
     pub t: f64,
 }
 
@@ -874,6 +792,8 @@ pub struct BodyGeom<'a> {
     /// 0 keeps only the broad colours (small text-mode discs), 1 keeps all surface detail.
     detail: f64,
     has_ring: bool,
+    /// Pixel back end: photographic lighting instead of the text renderer's readable one.
+    hd: bool,
     axis: V3,
     axes: (V3, V3, V3),
     spin: f64,
@@ -918,6 +838,10 @@ fn body_geom<'a>(view: &View, fr: &Frame<'a>, i: usize, pos: V3) -> Option<BodyG
     // the spin phase; Earth uses real sidereal time so its geography is correct
     let spin = if id == "earth" {
         gmst(fr.spin_jd)
+    } else if i == 0 {
+        // the real 25-day rotation is far too slow to see, so the Sun also turns once
+        // every 70 seconds of animation
+        TAU * (fr.t / 70.0 + fr.spin_jd * 24.0 / body.rotation_hours).rem_euclid(1.0)
     } else {
         TAU * (fr.spin_jd * 24.0 / body.rotation_hours).rem_euclid(1.0)
     };
@@ -940,6 +864,7 @@ fn body_geom<'a>(view: &View, fr: &Frame<'a>, i: usize, pos: V3) -> Option<BodyG
         ambient,
         detail,
         has_ring,
+        hd: fr.hd.is_some(),
         axis,
         axes: body_axes(axis),
         spin,
@@ -958,7 +883,7 @@ impl BodyGeom<'_> {
     /// How far from the centre anything is drawn, in planet radii.
     fn reach(&self) -> f64 {
         if self.i == 0 {
-            1.0 + (2.0f64).min(26.0 / self.sr)
+            1.0 + (1.6f64).min(26.0 / self.sr)
         } else if self.has_ring {
             2.3
         } else {
@@ -985,34 +910,87 @@ impl BodyGeom<'_> {
     fn planet(&self, u: f64, v: f64) -> (Rgb, f64) {
         let wp = (1.0 - u * u - v * v).max(0.0).sqrt();
         let n = self.right * u + self.up * v - self.fwd * wp;
+        let nb = self.to_body(n);
         if self.i == 0 {
-            let nb = self.to_body(n);
-            let gran = fbm(
-                V3::new(nb.x * 9.0, nb.y * 9.0, nb.z * 9.0 + self.t * 0.12),
-                3,
-            );
-            let c = Rgb::hex(0xff9a3c)
-                .mix(Rgb::hex(0xfff3d0), wp.powf(0.45))
-                .scale(0.86 + 0.22 * gran);
-            return (c, wp);
+            return (self.sun_surface(nb, wp), wp);
         }
-        let tex = surface(self.id, self.to_body(n), self.t)
-            .mix(self.body.rgb(), 0.75 * (1.0 - self.detail));
+        let (lon, lat) = lon_lat(nb);
+        let cloud = if self.id == "earth" {
+            earth_clouds(lon, lat, self.t)
+        } else {
+            0.0
+        };
+        let mut tex = surface(self.id, nb, self.t);
+        if self.id == "earth" && !self.hd {
+            // the Blue Marble oceans are very dark; lift them so Earth reads as blue in text
+            let water = smoothstep(0.05, 0.12, tex.b - tex.r.max(tex.g) * 0.8) * (1.0 - cloud);
+            tex = Rgb::new(tex.r.powf(0.8), tex.g.powf(0.8), tex.b.powf(0.8))
+                .mix(Rgb::hex(0x2a5fc8), water * 0.55);
+        }
+        let tex = tex.mix(self.body.rgb(), 0.75 * (1.0 - self.detail));
         let ndl = n.dot(self.sun_dir);
-        let mut lit = (ndl * 1.15 + 0.05).clamp(0.0, 1.0).powf(0.85);
+        let mut shade = 1.0;
         if self.has_ring && self.l_dot_a.abs() > 1e-3 {
             let s = -n.dot(self.axis) / self.l_dot_a;
             if s > 0.0 {
                 if let Some((tau, _, _)) = ring_at(self.id, (n + self.sun_dir * s).len()) {
-                    lit *= 0.25 + 0.75 * (-tau / self.l_dot_a.abs()).exp();
+                    shade = 0.25 + 0.75 * (-tau / self.l_dot_a.abs()).exp();
                 }
             }
         }
-        let mut c = tex.scale(self.ambient + (1.0 - self.ambient) * lit);
+        if !self.hd {
+            let lit = (ndl * 1.15 + 0.05).clamp(0.0, 1.0).powf(0.85) * shade;
+            let mut c = tex.scale(self.ambient + (1.0 - self.ambient) * lit);
+            if let Some(a) = self.atmosphere() {
+                c = c.add(a.scale((1.0 - wp).powf(2.5) * (ndl + 0.3).clamp(0.0, 1.0) * 0.5));
+            }
+            return (c, wp);
+        }
+        // HD: photographic lighting, a soft terminator and a nearly black night side
+        let lit = ((ndl + 0.04) / 1.04).clamp(0.0, 1.0).powf(0.85) * shade;
+        let limb = match self.id {
+            "jupiter" | "saturn" | "uranus" | "neptune" => 0.55 + 0.45 * wp.powf(0.5),
+            "venus" => 0.7 + 0.3 * wp.powf(0.5),
+            _ => 1.0,
+        };
+        // a little light on the night side of small discs so they keep their shape
+        let ambient = 0.04 + 0.24 * (1.0 - smoothstep(4.0, 14.0, self.sr));
+        let mut c = tex.scale(ambient + (1.0 - ambient) * lit * limb);
+        if self.id == "earth" {
+            let ground = textures::earth_day().sample(lon, lat);
+            let water =
+                smoothstep(0.02, 0.08, ground.b - ground.r.max(ground.g) * 0.9) * (1.0 - cloud);
+            // sun glint on the oceans
+            let half = (self.sun_dir - self.fwd).norm();
+            let glint = n.dot(half).max(0.0).powf(70.0) * water * smoothstep(0.0, 0.2, ndl);
+            c = c.add(Rgb::hex(0xfff2dc).scale(glint * 0.8));
+            // city lights on the night side, dimmed by cloud
+            let night = 1.0 - smoothstep(-0.2, 0.04, ndl);
+            if night > 0.0 {
+                let lights = textures::earth_night().sample(lon, lat);
+                c = c.add(
+                    Rgb::new(lights.r, lights.g * 0.85, lights.b * 0.6)
+                        .scale(night * (1.0 - 0.8 * cloud) * 1.3),
+                );
+            }
+        }
         if let Some(a) = self.atmosphere() {
-            c = c.add(a.scale((1.0 - wp).powf(2.5) * (ndl + 0.3).clamp(0.0, 1.0) * 0.5));
+            c = c.add(a.scale((1.0 - wp).powf(4.0) * smoothstep(-0.25, 0.45, ndl) * 0.75));
         }
         (c, wp)
+    }
+
+    /// The photosphere: the real map turning, boiling granulation and a dark, red limb.
+    fn sun_surface(&self, nb: V3, wp: f64) -> Rgb {
+        let (lon, lat) = lon_lat(nb);
+        let base = textures::sun().sample(lon, lat);
+        let boil = vnoise(nb.x * 38.0, nb.y * 38.0, nb.z * 38.0 + self.t * 0.7);
+        let limb = 0.32 + 0.68 * wp.powf(0.55);
+        // white-hot in the middle, warming to orange at the limb, as the eye sees it
+        let core = base.mix(Rgb::hex(0xfff4dc), 0.72 * wp.powf(0.7));
+        core.scale(1.15)
+            .mix(Rgb::hex(0xff8a2c), (1.0 - wp).powi(2) * 0.5)
+            .scale(limb * (0.9 + 0.18 * boil))
     }
 
     /// Ring colour and opacity at (u, v), and whether that bit of ring is in front of the
@@ -1047,19 +1025,17 @@ impl BodyGeom<'_> {
         ))
     }
 
-    /// Sun corona opacity at distance `d` (in solar radii) outside the disc.
+    /// Sun corona at distance `d` (in solar radii) outside the disc: a bright thin rim
+    /// fading into faint, slowly shifting streamers.
     fn corona(&self, u: f64, v: f64, d: f64) -> (Rgb, f64) {
-        let reach = self.reach();
+        let x = (d - 1.0).max(0.0);
         let ang = v.atan2(u);
-        let rays = 0.65
-            + 0.35
-                * vnoise(
-                    ang.cos() * 4.0 + 7.0,
-                    ang.sin() * 4.0,
-                    self.t * 0.45 - d * self.sr * 0.04,
-                );
-        let g = ((reach - d) / (reach - 1.0)).clamp(0.0, 1.0).powf(2.4) * rays;
-        (Rgb::hex(0xff7a2a).mix(Rgb::hex(0xffe2a0), g), g * 0.85)
+        let streamers = 0.55 + 0.45 * vnoise(ang.cos() * 3.0 + 7.0, ang.sin() * 3.0, self.t * 0.12);
+        let inner = (-x * 10.0).exp() * 0.8;
+        let outer = (-x * 2.4).exp() * 0.3 * streamers;
+        let edge = 1.0 - smoothstep(0.75, 1.0, x / (self.reach() - 1.0));
+        let col = Rgb::hex(0xfff3da).mix(Rgb::hex(0xffc27a), smoothstep(0.0, 0.7, x));
+        (col, ((inner + outer) * edge).min(1.0))
     }
 }
 
@@ -1124,26 +1100,23 @@ fn draw_body(cv: &mut Canvas, g: &BodyGeom) {
     }
 }
 
-/// An RGBA image aligned to the cell grid, drawn on top of the text by the graphics back end.
+/// An RGBA image drawn over the text by the graphics back end, positioned to the pixel.
 pub struct Sprite {
     /// Identifies what it shows across frames (body index, or a panel slot).
     pub slot: u32,
-    /// Top-left cell relative to the canvas, and size in cells.
-    pub col: i64,
-    pub row: i64,
-    pub cols: u32,
-    pub rows: u32,
-    /// Image size in pixels (may be lower than the cell box; the terminal scales it up).
+    /// Top-left corner in screen pixels, relative to the canvas.
+    pub x: f64,
+    pub y: f64,
     pub w: u32,
     pub h: u32,
     pub rgba: Vec<u8>,
-    /// Unchanged since last frame: leave the image on screen as it is.
+    /// The picture has not changed enough to redraw: just move the one on screen.
     pub keep: bool,
 }
 
-/// Images larger than this are rendered at half resolution and scaled up by the terminal,
-/// which keeps very close fly-bys fast; at that size the difference is hard to see.
-const MAX_SPRITE_PIXELS: u64 = 240_000;
+/// Images bigger than this are shaded at half resolution and smoothly upscaled, which keeps
+/// very close fly-bys fast; at that size the difference is hard to see.
+const HALF_RES_PIXELS: u64 = 600_000;
 
 /// HD back end: render the body at true pixel resolution with anti-aliased edges, a soft
 /// corona for the Sun and a thin atmosphere halo for planets that have one.
@@ -1158,58 +1131,50 @@ fn body_sprite(
     let (x, y) = (g.cx * cw, g.cy * ch * 0.5);
     let r_px = g.sr * cw;
     let ext = r_px * g.reach() + 1.0;
-    let col = ((x - ext) / cw).floor() as i64;
-    let row = ((y - ext) / ch).floor() as i64;
-    let cols = (((x + ext) / cw).ceil() as i64 - col).max(1) as u32;
-    let rows = (((y + ext) / ch).ceil() as i64 - row).max(1) as u32;
-    let full = cols as u64 * cell.0 as u64 * rows as u64 * cell.1 as u64;
-    // Big images change slowly (a planet's spin, the corona's flicker), so they are redrawn
-    // less often than small ones; an image that has not moved is simply left on screen.
-    let interval = if slot == CARD_SLOT {
-        0.1
-    } else if full > 150_000 {
+    let (x0, y0) = ((x - ext).floor(), (y - ext).floor());
+    let size = (2.0 * ext).ceil() as u32 + 1;
+    let px = size as u64 * size as u64;
+    // Motion comes from moving the image every frame, which costs almost nothing. What it
+    // shows (spin, phase, the corona's flicker) changes slowly, so it is redrawn less often,
+    // and the bigger it is the less often.
+    let interval = if slot == CARD_SLOT || px > 150_000 {
+        1.0 / 8.0
+    } else if g.i == 0 {
         1.0 / 12.0
-    } else if full > 30_000 {
-        1.0 / 20.0
+    } else if px > 20_000 {
+        1.0 / 10.0
     } else {
-        0.0
+        1.0 / 15.0
     };
     if let Some(prev) = sent.and_then(|m| m.get(&slot)) {
-        if (prev.col, prev.row, prev.cols, prev.rows) == (col, row, cols, rows)
-            && g.t - prev.t < interval
-        {
+        if prev.w.abs_diff(size) <= 1 && g.t - prev.t < interval {
             return Some(Sprite {
                 slot,
-                col,
-                row,
-                cols,
-                rows,
-                w: 0,
-                h: 0,
+                x: x0,
+                y: y0,
+                w: prev.w,
+                h: prev.h,
                 rgba: Vec::new(),
                 keep: true,
             });
         }
     }
-    let (pw, ph) = if full > MAX_SPRITE_PIXELS {
-        ((cell.0 / 2).max(1), (cell.1 / 2).max(1))
+    let half = px > HALF_RES_PIXELS;
+    let (step, rs) = if half {
+        (2.0, size.div_ceil(2))
     } else {
-        (cell.0, cell.1)
+        (1.0, size)
     };
-    let (w, h) = (cols * pw, rows * ph);
-    // screen pixels per image pixel
-    let (sx, sy) = (cw / pw as f64, ch / ph as f64);
-    let (ox, oy) = (col as f64 * cw, row as f64 * ch);
     let atmo = g.atmosphere();
-    let mut rgba = vec![0u8; (w * h * 4) as usize];
-    par_rows(&mut rgba, w as usize, |iy, line| {
-        for ix in 0..w as usize {
-            let px = ox + (ix as f64 + 0.5) * sx;
-            let py = oy + (iy as f64 + 0.5) * sy;
+    let mut rgba = vec![0u8; (rs * rs * 4) as usize];
+    par_rows(&mut rgba, rs as usize, |iy, line| {
+        for ix in 0..rs as usize {
+            let px = x0 + (ix as f64 + 0.5) * step;
+            let py = y0 + (iy as f64 + 0.5) * step;
             let (u, v) = ((px - x) / r_px, -(py - y) / r_px);
             let d = (u * u + v * v).sqrt();
             // planet coverage, supersampled near the rim for a clean edge
-            let edge = 1.5 * sx.max(sy) / r_px;
+            let edge = 1.5 * step / r_px;
             let cov = if d < 1.0 - edge {
                 1.0
             } else if d > 1.0 + edge {
@@ -1218,8 +1183,8 @@ fn body_sprite(
                 let mut n = 0;
                 for k in 0..16 {
                     let (a, b) = ((k % 4) as f64 + 0.5, (k / 4) as f64 + 0.5);
-                    let su = (ox + (ix as f64 + a / 4.0) * sx - x) / r_px;
-                    let sv = -(oy + (iy as f64 + b / 4.0) * sy - y) / r_px;
+                    let su = (x0 + (ix as f64 + a / 4.0) * step - x) / r_px;
+                    let sv = -(y0 + (iy as f64 + b / 4.0) * step - y) / r_px;
                     n += (su * su + sv * sv <= 1.0) as u32;
                 }
                 n as f64 / 16.0
@@ -1230,11 +1195,11 @@ fn body_sprite(
                 if g.i == 0 {
                     out = g.corona(u, v, d.max(1.0));
                 } else if let Some(a) = atmo {
-                    let k = ((d - 1.0) / 0.08).clamp(0.0, 1.0);
+                    let k = ((d - 1.0) / 0.06).clamp(0.0, 1.0);
                     let rim = V3::new(u, v, 0.0) * (1.0 / d.max(1e-9));
                     let lit =
-                        ((g.right * rim.x + g.up * rim.y).dot(g.sun_dir) + 0.35).clamp(0.0, 1.0);
-                    out = (a, (1.0 - k).powi(2) * 0.55 * lit.max(0.15));
+                        smoothstep(-0.3, 0.5, (g.right * rim.x + g.up * rim.y).dot(g.sun_dir));
+                    out = (a, (1.0 - k).powi(2) * 0.5 * lit);
                 }
             }
             let (uc, vc) = if d > 0.995 {
@@ -1263,17 +1228,38 @@ fn body_sprite(
             ]);
         }
     });
+    if half {
+        rgba = upscale2(&rgba, rs as usize, size as usize);
+    }
     Some(Sprite {
         slot,
-        col,
-        row,
-        cols,
-        rows,
-        w,
-        h,
+        x: x0,
+        y: y0,
+        w: size,
+        h: size,
         rgba,
         keep: false,
     })
+}
+
+/// Bilinear 2x upscale of a square RGBA image from `n` to `m` pixels a side.
+fn upscale2(src: &[u8], n: usize, m: usize) -> Vec<u8> {
+    let mut out = vec![0u8; m * m * 4];
+    let at = |x: usize, y: usize, c: usize| src[(y.min(n - 1) * n + x.min(n - 1)) * 4 + c] as f64;
+    for y in 0..m {
+        let fy = ((y as f64 + 0.5) / 2.0 - 0.5).max(0.0);
+        let (y0, ty) = (fy.floor() as usize, fy - fy.floor());
+        for x in 0..m {
+            let fx = ((x as f64 + 0.5) / 2.0 - 0.5).max(0.0);
+            let (x0, tx) = (fx.floor() as usize, fx - fx.floor());
+            for c in 0..4 {
+                let top = at(x0, y0, c) + (at(x0 + 1, y0, c) - at(x0, y0, c)) * tx;
+                let bot = at(x0, y0 + 1, c) + (at(x0 + 1, y0 + 1, c) - at(x0, y0 + 1, c)) * tx;
+                out[(y * m + x) * 4 + c] = (top + (bot - top) * ty + 0.5) as u8;
+            }
+        }
+    }
+    out
 }
 
 /// Porter-Duff "over" for straight (non-premultiplied) colour and alpha.

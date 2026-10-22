@@ -17,6 +17,7 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 flate2 = "1"
+jpeg-decoder = { version = "0.3", default-features = false }
 
 [profile.release]
 opt-level = 3

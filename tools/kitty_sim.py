@@ -32,15 +32,26 @@ def main():
     ansi2png.main(t.name, a.dst, bg)
     os.unlink(t.name)
     img = Image.open(a.dst).convert("RGBA")
-    cursor, pending, keys, n = (1, 1), [], {}, 0
+    cursor, pending, keys, n, images = (1, 1), [], {}, 0, {}
     for m in CMD.finditer(cmds):
         if m.group(1):
             cursor = (int(m.group(1)), int(m.group(2)))
             continue
         k = dict(kv.split(b"=", 1) for kv in m.group(3).split(b",") if b"=" in kv)
-        if k.get(b"a") == b"d":
+        act = k.get(b"a", b"")
+        if act == b"d":
+            images.pop(int(k[b"i"]), None)
             continue
-        if b"a" in k:
+        if act == b"p":
+            pic = images[int(k[b"i"])]
+            sx, sy = int(k.get(b"x", 0)), int(k.get(b"y", 0))
+            sw, sh = int(k.get(b"w", pic.width)), int(k.get(b"h", pic.height))
+            pic = pic.crop((sx, sy, sx + sw, sy + sh))
+            pos = ((cursor[1] - 1) * cw + int(k.get(b"X", 0)), (cursor[0] - 1) * ch + int(k.get(b"Y", 0)))
+            img.alpha_composite(pic, pos)
+            n += 1
+            continue
+        if act:
             keys, pending = k, []
         pending.append(m.group(4) or b"")
         if k.get(b"m", b"0") == b"0":
@@ -48,14 +59,9 @@ def main():
             if keys.get(b"o") == b"z":
                 data = zlib.decompress(data)
             w, h = int(keys[b"s"]), int(keys[b"v"])
-            pic = Image.frombytes("RGBA", (w, h), data)
-            cols, rows = int(keys.get(b"c", 0)), int(keys.get(b"r", 0))
-            if cols and rows and (cols * cw, rows * ch) != (w, h):
-                pic = pic.resize((cols * cw, rows * ch), Image.BILINEAR)
-            img.alpha_composite(pic, ((cursor[1] - 1) * cw, (cursor[0] - 1) * ch))
-            n += 1
+            images[int(keys[b"i"])] = Image.frombytes("RGBA", (w, h), data)
     img.convert("RGB").save(a.dst)
-    print(f"composited {n} images", file=sys.stderr)
+    print(f"composited {n} placements", file=sys.stderr)
 
 
 if __name__ == "__main__":

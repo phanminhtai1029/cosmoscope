@@ -6,6 +6,7 @@ mod ephemeris;
 mod kitty;
 mod math;
 mod render;
+mod textures;
 mod time;
 mod ui;
 
@@ -156,9 +157,17 @@ fn run(args: Args) -> Result<(), String> {
         return snapshot(&mut app, size, args.at);
     }
 
+    textures::warm_up();
     let mut terminal = ratatui::init();
+    let mut transfer = (kitty::Transfer::Direct, None);
     if want_hd {
         app.hd = cell_size();
+        if app.hd.is_some() {
+            transfer = match kitty::Probe::start(&mut io::stdout()) {
+                Ok(probe) => (kitty::Transfer::Direct, Some(probe)),
+                Err(t) => (t, None),
+            };
+        }
     }
     let _ = execute!(io::stdout(), EnableMouseCapture);
     let hook = std::panic::take_hook();
@@ -167,7 +176,14 @@ fn run(args: Args) -> Result<(), String> {
         hook(info);
     }));
     let mut gfx = kitty::Kitty::default();
-    let result = event_loop(&mut terminal, &mut app, &mut gfx, args.fps);
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        &mut gfx,
+        transfer.0,
+        transfer.1,
+        args.fps,
+    );
     let _ = gfx.clear(&mut io::stdout());
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
@@ -193,6 +209,8 @@ fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     gfx: &mut kitty::Kitty,
+    mut transfer: kitty::Transfer,
+    mut probe: Option<kitty::Probe>,
     fps: u32,
 ) -> io::Result<()> {
     let frame = Duration::from_secs_f64(1.0 / fps as f64);
@@ -202,11 +220,15 @@ fn event_loop(
         app.update((now - last).as_secs_f64().min(0.1));
         last = now;
         if app.hd.is_some() {
-            // text and images land together, so planets never lag behind their labels
             let mut out = io::stdout();
+            if let Some(verdict) = probe.as_ref().and_then(|p| p.poll(&mut out)) {
+                transfer = verdict;
+                probe = None;
+            }
+            // text and images land together, so planets never lag behind their labels
             execute!(out, BeginSynchronizedUpdate)?;
             terminal.draw(|f| ui::draw(f, app))?;
-            gfx.frame(&mut out, &app.images)?;
+            gfx.frame(&mut out, &app.images, transfer)?;
             execute!(out, EndSynchronizedUpdate)?;
         } else {
             terminal.draw(|f| ui::draw(f, app))?;
@@ -268,7 +290,7 @@ fn snapshot(app: &mut App, size: &str, at: f64) -> Result<(), String> {
     let mut bytes = out.into_bytes();
     // with graphics, the image commands follow the text, exactly as a terminal would get them
     kitty::Kitty::default()
-        .frame(&mut bytes, &app.images)
+        .frame(&mut bytes, &app.images, kitty::Transfer::Direct)
         .map_err(|e| e.to_string())?;
     io::stdout().write_all(&bytes).map_err(|e| e.to_string())
 }

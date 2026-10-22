@@ -106,19 +106,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             (
                 s.slot,
                 render::Sent {
-                    col: s.col,
-                    row: s.row,
-                    cols: s.cols,
-                    rows: s.rows,
+                    w: s.w,
+                    h: s.h,
                     t: app.t,
                 },
             )
         })
         .collect();
     let space = Rect::new(main.x, main.y, main.width - panel_w, main.height);
+    let cell = app.hd.unwrap_or((1, 1));
     let mut images: Vec<Placed> = sprites
         .into_iter()
-        .filter_map(|s| place(s, main, space))
+        .filter_map(|s| place(s, main, space, cell))
         .collect();
     f.render_widget(SpaceView(&app.canvas), main);
 
@@ -376,13 +375,11 @@ fn draw_panel(
             } else {
                 card = render::render_card(&mut cv, &app.scene, card_frame, i).and_then(|s| {
                     let sent = (!s.keep).then_some(render::Sent {
-                        col: s.col,
-                        row: s.row,
-                        cols: s.cols,
-                        rows: s.rows,
+                        w: s.w,
+                        h: s.h,
                         t: app.t,
                     });
-                    place(s, card_area, card_area).map(|p| (p, sent))
+                    place(s, card_area, card_area, app.hd.unwrap_or((1, 1))).map(|p| (p, sent))
                 });
             }
             f.render_widget(SpaceView(&cv), card_area);
@@ -403,51 +400,37 @@ fn draw_panel(
 }
 
 /// Turn a sprite (cells relative to `origin`) into an absolute placement, cropped to `clip`.
-fn place(s: Sprite, origin: Rect, clip: Rect) -> Option<Placed> {
-    let (c0, r0) = (origin.x as i64 + s.col, origin.y as i64 + s.row);
-    let (c1, r1) = (c0 + s.cols as i64, r0 + s.rows as i64);
-    let (k0, k1) = (c0.max(clip.x as i64), c1.min(clip.right() as i64));
-    let (q0, q1) = (r0.max(clip.y as i64), r1.min(clip.bottom() as i64));
-    if k0 >= k1 || q0 >= q1 {
+fn place(s: Sprite, origin: Rect, clip: Rect, cell: (u32, u32)) -> Option<Placed> {
+    let (cw, ch) = (cell.0 as i64, cell.1 as i64);
+    // absolute top-left in screen pixels, and the clip rectangle in pixels
+    let (ax, ay) = (
+        origin.x as i64 * cw + s.x as i64,
+        origin.y as i64 * ch + s.y as i64,
+    );
+    let (cx0, cy0) = (clip.x as i64 * cw, clip.y as i64 * ch);
+    let (cx1, cy1) = (clip.right() as i64 * cw, clip.bottom() as i64 * ch);
+    let (sx0, sy0) = ((cx0 - ax).max(0), (cy0 - ay).max(0));
+    let (sx1, sy1) = ((cx1 - ax).min(s.w as i64), (cy1 - ay).min(s.h as i64));
+    if sx1 <= sx0 || sy1 <= sy0 {
         return None;
     }
-    if s.keep {
-        let (cols, rows) = ((k1 - k0) as u32, (q1 - q0) as u32);
-        return Some(Placed {
-            slot: s.slot,
-            col: k0 as u16,
-            row: q0 as u16,
-            cols,
-            rows,
-            w: 0,
-            h: 0,
-            rgba: Vec::new(),
-            keep: true,
-        });
-    }
-    let (pw, ph) = ((s.w / s.cols) as usize, (s.h / s.rows) as usize);
-    let (x0, y0) = ((k0 - c0) as usize * pw, (q0 - r0) as usize * ph);
-    let (w, h) = ((k1 - k0) as usize * pw, (q1 - q0) as usize * ph);
-    let rgba = if w == s.w as usize && h == s.h as usize {
-        s.rgba
-    } else {
-        let mut out = Vec::with_capacity(w * h * 4);
-        for y in y0..y0 + h {
-            let start = (y * s.w as usize + x0) * 4;
-            out.extend_from_slice(&s.rgba[start..start + w * 4]);
-        }
-        out
-    };
+    let (px, py) = (ax + sx0, ay + sy0);
     Some(Placed {
         slot: s.slot,
-        col: k0 as u16,
-        row: q0 as u16,
-        cols: (k1 - k0) as u32,
-        rows: (q1 - q0) as u32,
-        w: w as u32,
-        h: h as u32,
-        rgba,
-        keep: false,
+        col: (px / cw) as u16,
+        row: (py / ch) as u16,
+        x_off: (px % cw) as u32,
+        y_off: (py % ch) as u32,
+        src: (
+            sx0 as u32,
+            sy0 as u32,
+            (sx1 - sx0) as u32,
+            (sy1 - sy0) as u32,
+        ),
+        w: s.w,
+        h: s.h,
+        rgba: s.rgba,
+        keep: s.keep,
     })
 }
 
@@ -572,44 +555,53 @@ fn draw_help(f: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
 
-    fn sprite(col: i64, row: i64, cols: u32, rows: u32) -> Sprite {
-        let (w, h) = (cols * 2, rows * 3);
-        let rgba = (0..w * h).flat_map(|k| [k as u8, 0, 0, 255]).collect();
+    fn sprite(x: f64, y: f64, w: u32, h: u32) -> Sprite {
         Sprite {
             slot: 1,
-            col,
-            row,
-            cols,
-            rows,
+            x,
+            y,
             w,
             h,
-            rgba,
+            rgba: vec![0; (w * h * 4) as usize],
             keep: false,
         }
     }
 
     #[test]
-    fn place_crops_to_the_clip_rect() {
-        // 4x2 cells at (8, 1) inside an area at x=2, clipped where the panel starts (x < 12)
+    fn place_positions_to_the_pixel_and_crops_to_the_clip() {
+        // 10x20 cells; a 40x30 image at pixel (95, 47) inside an area that starts at cell 2,
+        // clipped where the panel starts at cell 12 (pixel 120)
         let p = place(
-            sprite(8, 1, 4, 2),
+            sprite(95.0, 47.0, 40, 30),
             Rect::new(2, 0, 20, 10),
             Rect::new(2, 0, 10, 10),
+            (10, 20),
         )
         .unwrap();
-        assert_eq!((p.col, p.row, p.cols, p.rows), (10, 1, 2, 2));
-        assert_eq!((p.w, p.h), (4, 6));
-        assert_eq!(p.rgba.len(), 4 * 6 * 4);
-        // first kept pixel is column 0 of the original row 0
-        assert_eq!(p.rgba[0], 0);
+        assert_eq!((p.col, p.row, p.x_off, p.y_off), (11, 2, 5, 7));
+        assert_eq!(p.src, (0, 0, 5, 30));
+    }
+
+    #[test]
+    fn place_crops_the_top_left_too() {
+        let p = place(
+            sprite(-6.0, -4.0, 20, 20),
+            Rect::new(0, 0, 20, 10),
+            Rect::new(0, 0, 20, 10),
+            (10, 20),
+        )
+        .unwrap();
+        assert_eq!((p.col, p.row, p.x_off, p.y_off), (0, 0, 0, 0));
+        assert_eq!(p.src, (6, 4, 14, 16));
     }
 
     #[test]
     fn place_drops_sprites_outside() {
         assert!(place(
-            sprite(30, 0, 2, 2),
+            sprite(400.0, 0.0, 20, 20),
             Rect::new(0, 0, 20, 10),
-            Rect::new(0, 0, 20, 10)
+            Rect::new(0, 0, 20, 10),
+            (10, 20)
         )
         .is_none());
     }
