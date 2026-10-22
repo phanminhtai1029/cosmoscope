@@ -126,6 +126,9 @@ impl Rgb {
     pub fn add(self, o: Rgb) -> Rgb {
         Rgb::new(self.r + o.r, self.g + o.g, self.b + o.b)
     }
+    pub fn luma(self) -> f64 {
+        0.2126 * self.r + 0.7152 * self.g + 0.0722 * self.b
+    }
     pub fn to_u8(self) -> (u8, u8, u8) {
         let q = |v: f64| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         (q(self.r), q(self.g), q(self.b))

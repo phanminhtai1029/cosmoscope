@@ -792,11 +792,14 @@ fn draw_body(cv: &mut Canvas, view: &View, fr: &Frame, i: usize, pos: V3) -> Opt
     let proj_r = radius / depth * view.f;
     // keep tiny planets visible as at least a small disc, scaled to the screen size
     let screen = (view.cy / 55.0).clamp(0.6, 1.3);
-    let sr = proj_r.max(screen * if i == 0 { 4.0 } else { 1.3 + 11.0 * radius });
-    // tiny discs get extra ambient light so their colour still reads
-    let ambient = 0.06 + 0.3 * (1.0 - smoothstep(3.0, 8.0, sr));
+    let sr = proj_r.max(screen * if i == 0 { 5.0 } else { 1.8 + 15.0 * radius });
+    // Small discs are lit almost fully so their colour reads at a glance. Big ones show the
+    // real phase, but their night side keeps a trace of colour instead of going black, which
+    // would look like a hole on terminals with a coloured background.
+    let ambient = 0.10 + 0.5 * (1.0 - smoothstep(3.5, 10.0, sr));
     let id = body.id.as_str();
-    let has_ring = has_rings(id);
+    // rings only once they are big enough to read; tiny ones are just dark specks
+    let has_ring = has_rings(id) && sr >= if id == "uranus" { 10.0 } else { 2.5 };
     let reach = if has_ring { sr * 2.3 } else { sr } + 1.0;
     let axis = body.pole();
     let (bx, by, bz) = body_axes(axis);
@@ -816,10 +819,26 @@ fn draw_body(cv: &mut Canvas, view: &View, fr: &Frame, i: usize, pos: V3) -> Opt
     let (y0, y1) = ((pcy - reach).floor() as i64, (pcy + reach).ceil() as i64);
     for py in y0..=y1 {
         for px in x0..=x1 {
-            let u = (px as f64 + 0.5 - pcx) / sr;
-            let v = -(py as f64 + 0.5 - pcy) / sr;
-            let d2 = u * u + v * v;
-            let on_planet = d2 <= 1.0;
+            let mut u = (px as f64 + 0.5 - pcx) / sr;
+            let mut v = -(py as f64 + 0.5 - pcy) / sr;
+            // 4x4 coverage test so small discs come out round instead of as a cross
+            let mut inside = 0;
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let su = (px as f64 + (sx as f64 + 0.5) / 4.0 - pcx) / sr;
+                    let sv = -(py as f64 + (sy as f64 + 0.5) / 4.0 - pcy) / sr;
+                    inside += (su * su + sv * sv <= 1.0) as u32;
+                }
+            }
+            let on_planet = inside >= 8;
+            let mut d2 = u * u + v * v;
+            if on_planet && d2 > 0.97 {
+                // an edge pixel whose centre falls just outside: shade it at the rim
+                let k = (0.97 / d2).sqrt();
+                u *= k;
+                v *= k;
+                d2 = 0.97;
+            }
             let wp = if on_planet { (1.0 - d2).sqrt() } else { -1e9 };
             let mut col: Option<Rgb> = None;
             if on_planet {
@@ -877,7 +896,11 @@ fn draw_body(cv: &mut Canvas, view: &View, fr: &Frame, i: usize, pos: V3) -> Opt
                         let ring_col = rc.scale(alb * light * shadow);
                         col = match col {
                             Some(c) => Some(c.mix(ring_col, alpha)),
-                            None if alpha > 0.12 => Some(ring_col.scale(alpha.sqrt())),
+                            // over empty space, skip faint or very dark ring pixels: they read
+                            // as dirt on terminals that are not pure black
+                            None if alpha > 0.12 && ring_col.scale(alpha.sqrt()).luma() > 0.07 => {
+                                Some(ring_col.scale(alpha.sqrt()))
+                            }
                             None => None,
                         };
                     }

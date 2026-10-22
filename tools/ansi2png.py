@@ -58,11 +58,11 @@ def sgr(params, fg, bg):
     return fg, bg
 
 
-def main(src, dst):
+def main(src, dst, bg=BG):
     lines = open(src, encoding="utf-8").read().split("\n")
     lines = [l for l in lines if l]
     cols = max(len(TOKEN.sub(lambda m: m.group(2) or "", l)) for l in lines)
-    img = Image.new("RGB", (cols * CW, len(lines) * CH), BG)
+    img = Image.new("RGB", (cols * CW, len(lines) * CH), bg)
     d = ImageDraw.Draw(img)
     f = font()
     for y, line in enumerate(lines):
@@ -94,4 +94,6 @@ def main(src, dst):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    # optional third argument: terminal background as rrggbb, e.g. 300a24 for Ubuntu's default
+    bg = tuple(int(sys.argv[3][i:i + 2], 16) for i in (0, 2, 4)) if len(sys.argv) > 3 else BG
+    main(sys.argv[1], sys.argv[2], bg)
