@@ -152,6 +152,24 @@ fn frame_for_card(app: &App, _w: u16) -> render::Frame<'_> {
     }
 }
 
+/// A symbol, or a stand-in that Consolas and Lucida Console have (see `render::basic_glyphs`).
+fn sym(full: &'static str, basic: &'static str) -> &'static str {
+    if render::basic_glyphs() {
+        basic
+    } else {
+        full
+    }
+}
+
+/// Rounded corners, or plain ones for console fonts without them (Lucida Console).
+fn border() -> BorderType {
+    if render::basic_glyphs() {
+        BorderType::Plain
+    } else {
+        BorderType::Rounded
+    }
+}
+
 fn st(c: Rgb) -> Style {
     Style::default().fg(color(c))
 }
@@ -227,7 +245,7 @@ fn header(label: &str, col: Rgb) -> Line<'static> {
 fn bar(frac: f64, width: usize, col: Rgb) -> Vec<Span<'static>> {
     let filled = ((frac.clamp(0.0, 1.0)) * width as f64).round() as usize;
     vec![
-        Span::styled("━".repeat(filled), st(col)),
+        Span::styled(sym("━", "═").repeat(filled), st(col)),
         Span::styled("─".repeat(width - filled), st(Rgb::hex(0x3a3f5c))),
         Span::styled(format!(" {:>3.0}%", frac * 100.0), st(TEXT)),
     ]
@@ -324,17 +342,21 @@ fn draw_panel(
     let shown = (((app.t - app.fact_since) * 55.0) as usize).min(fact.chars().count());
     let mut text: String = fact.chars().take(shown).collect();
     if shown < fact.chars().count() {
-        text.push('▏');
+        text.push_str(sym("▏", "_"));
     }
     let dots: String = (0..b.facts.len())
-        .map(|k| if k == app.fact { '●' } else { '·' })
-        .collect::<Vec<_>>()
-        .iter()
+        .map(|k| {
+            if k == app.fact {
+                sym("●", "•")
+            } else {
+                "·"
+            }
+        })
         .map(|c| format!("{c} "))
         .collect();
 
     let block = Block::bordered()
-        .border_type(BorderType::Rounded)
+        .border_type(border())
         .border_style(st(col.mix(Rgb::hex(0x30344d), 0.55)))
         .title(Span::styled(
             format!(" {} ", b.name.to_uppercase()),
@@ -476,7 +498,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!("{arrow} {}", SPEEDS[app.speed].1), st(ACCENT))
     };
     let mut left = vec![
-        Span::styled(" ◉ cosmoscope ", st(BRIGHT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(" {} cosmoscope ", sym("◉", "○")),
+            st(BRIGHT).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("│ ", st(DIM)),
         Span::styled(format!("{} UTC", time::format_jd(app.jd)), st(TEXT)),
         Span::styled(" │ ", st(DIM)),
@@ -502,7 +527,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if let Some(i) = app.focused {
         left.push(Span::styled(" │ ", st(DIM)));
         left.push(Span::styled(
-            format!("◎ {}", app.bodies[i].name),
+            format!("{} {}", sym("◎", "○"), app.bodies[i].name),
             st(app.bodies[i].rgb()),
         ));
     }
@@ -573,7 +598,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
     f.render_widget(
         Paragraph::new(lines).block(
             Block::bordered()
-                .border_type(BorderType::Rounded)
+                .border_type(border())
                 .border_style(st(ACCENT))
                 .title(Span::styled(
                     " keys ",

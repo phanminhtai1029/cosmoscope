@@ -4,11 +4,25 @@
 //! for orbits and small particles, and plain glyphs for the sky. Empty cells keep the
 //! terminal's own background, so transparent terminals stay transparent.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::data::Body;
 use crate::ephemeris;
 use crate::math::{fbm, hashf, smoothstep, vnoise, Rgb, TAU, V3};
 use crate::textures;
 use crate::time::J2000;
+
+static BASIC_GLYPHS: AtomicBool = AtomicBool::new(false);
+
+/// Draw edges with half blocks only, for fonts without the quadrant glyphs (such as
+/// Consolas, the Windows console's default).
+pub fn set_basic_glyphs(on: bool) {
+    BASIC_GLYPHS.store(on, Ordering::Relaxed);
+}
+
+pub fn basic_glyphs() -> bool {
+    BASIC_GLYPHS.load(Ordering::Relaxed)
+}
 
 /// Final content of one terminal cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -202,6 +216,9 @@ impl Canvas {
                 }
             };
         }
+        if mask != 0 && basic_glyphs() {
+            return half_block_edge(mask, q);
+        }
         if mask != 0 {
             // an edge: quadrant glyphs trace the outline at twice the horizontal resolution,
             // over the terminal's own background
@@ -241,6 +258,27 @@ impl Canvas {
         }
         Cell::EMPTY
     }
+}
+
+/// An edge cell drawn with half blocks only: each pixel stretches over its half of the cell,
+/// so outlines are a little coarser but every glyph is in Consolas and Lucida Console.
+fn half_block_edge(mask: u8, q: [Option<Rgb>; 4]) -> Cell {
+    let avg = |px: &[Option<Rgb>]| {
+        let set: Vec<Rgb> = px.iter().flatten().copied().collect();
+        let k = 1.0 / set.len().max(1) as f64;
+        (!set.is_empty()).then(|| set.iter().fold(Rgb::BLACK, |a, c| a.add(c.scale(k))))
+    };
+    let (top, bot) = (avg(&q[..2]), avg(&q[2..]));
+    let (ch, fg, bg) = match mask {
+        5 => ('▌', avg(&q), None),
+        10 => ('▐', avg(&q), None),
+        // three of four pixels: fill the cell, one colour per half
+        7 | 11 | 13 | 14 => ('▀', top, bot),
+        // one or two pixels (a diagonal pair takes the top half)
+        _ if top.is_some() => ('▀', avg(&q), None),
+        _ => ('▄', bot, None),
+    };
+    Cell { ch, fg, bg }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -664,7 +702,11 @@ impl Scene {
                 continue;
             }
             let (col, text) = if sel {
-                (body.rgb().mix(Rgb::WHITE, 0.3), format!("▸ {}", body.name))
+                let mark = if basic_glyphs() { '►' } else { '▸' };
+                (
+                    body.rgb().mix(Rgb::WHITE, 0.3),
+                    format!("{mark} {}", body.name),
+                )
             } else {
                 (Rgb::hex(0x8088a8), body.name.clone())
             };

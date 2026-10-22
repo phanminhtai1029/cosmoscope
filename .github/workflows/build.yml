@@ -15,7 +15,11 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -69,6 +73,8 @@ jobs:
           ./${{ matrix.asset }} --date 2026-01-01 --snapshot 80x24 --at 1 > frame.txt
           test "$(wc -l < frame.txt)" -eq 24
           ./${{ matrix.asset }} saturn --date 2032-06-01 --snapshot 120x40 --at 3 > /dev/null
+          ./${{ matrix.asset }} saturn --date 2032-06-01 --graphics sixel --snapshot 120x40 --at 3 > sixel.txt
+          grep -q "$(printf '\033')P0;1;0q" sixel.txt
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -77,6 +83,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $frame = & ./${{ matrix.asset }} --date 2026-01-01 --snapshot 80x24 --at 1
           if ($frame.Count -ne 24) { Write-Error "expected 24 lines, got $($frame.Count)"; exit 1 }
+          # the C runtime is linked in (.cargo/config.toml), so no VC++ Redistributable is needed
+          if (Select-String -Path ./${{ matrix.asset }} -Pattern 'VCRUNTIME140' -SimpleMatch -Quiet) {
+            Write-Error "the binary depends on VCRUNTIME140.dll"; exit 1
+          }
+          # basic glyphs (classic console) use nothing outside Consolas and Lucida Console
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          # quadrants, ▏ ◉ ◎ ● ▸ ━ and rounded corners
+          $codes = (0x2596..0x259F) + @(0x258F, 0x25C9, 0x25CE, 0x25CF, 0x25B8, 0x2501) + (0x256D..0x2570)
+          $missing = '[' + (-join [char[]]$codes) + ']'
+          $full = (& ./${{ matrix.asset }} saturn --date 2032-06-01 --glyphs full --snapshot 120x40 --at 3) -join ''
+          if ($full -notmatch $missing) { Write-Error "glyph check is not seeing the output"; exit 1 }
+          $basic = (& ./${{ matrix.asset }} saturn --date 2032-06-01 --glyphs basic --snapshot 120x40 --at 3) -join ''
+          if ($basic -match $missing) {
+            Write-Error "basic glyphs contain a symbol console fonts lack: $($Matches[0])"; exit 1
+          }
+          # HD in Windows Terminal: planets as sixel images
+          $sixel = (& ./${{ matrix.asset }} saturn --date 2032-06-01 --graphics sixel --snapshot 120x40 --at 3) -join ''
+          if (-not $sixel.Contains([char]27 + 'P0;1;0q')) { Write-Error "no sixel image in the frame"; exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}

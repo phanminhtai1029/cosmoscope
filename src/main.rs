@@ -1,12 +1,14 @@
 //! cosmoscope: a living, interactive Solar System in the terminal.
 
 mod app;
+mod console;
 mod data;
 mod ephemeris;
 mod kitty;
 mod math;
 mod profile;
 mod render;
+mod sixel;
 mod textures;
 mod time;
 mod ui;
@@ -15,16 +17,18 @@ use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use ratatui::backend::TestBackend;
+use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
 };
-use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{self as term, BeginSynchronizedUpdate, EndSynchronizedUpdate};
+use ratatui::crossterm::{cursor, execute, queue};
 use ratatui::style::Color;
-use ratatui::{DefaultTerminal, Terminal};
+use ratatui::Terminal;
 
 use app::App;
+
+type Term = Terminal<CrosstermBackend<console::FrameOut>>;
 
 #[derive(Parser)]
 #[command(
@@ -56,10 +60,14 @@ struct Args {
     /// Colour mode: auto, truecolor or 256
     #[arg(long, default_value = "auto")]
     colors: String,
-    /// Draw planets as real images: auto (when the terminal speaks the kitty graphics
-    /// protocol: kitty, Ghostty, WezTerm), kitty (force it) or off
+    /// Draw planets as real images: auto (with the kitty graphics protocol in kitty, Ghostty
+    /// and WezTerm, or sixel in Windows Terminal), kitty, sixel (force one) or off
     #[arg(long, default_value = "auto")]
     graphics: String,
+    /// Glyph set: auto, full, or basic (only glyphs that Consolas and Lucida Console have;
+    /// auto picks it in the classic Windows console)
+    #[arg(long, default_value = "auto")]
+    glyphs: String,
     /// Cell size in pixels for --snapshot with graphics, e.g. 10x20
     #[arg(long, hide = true, default_value = "10x20")]
     cell: String,
@@ -112,6 +120,17 @@ fn run(args: Args) -> Result<(), String> {
             ))
         }
     });
+    let glyphs = std::env::var("COSMOSCOPE_GLYPHS").unwrap_or(args.glyphs.clone());
+    render::set_basic_glyphs(match glyphs.as_str() {
+        "auto" => console::classic_windows_console(),
+        "full" => false,
+        "basic" => true,
+        other => {
+            return Err(format!(
+                "unknown glyph set '{other}' (use auto, full or basic)"
+            ))
+        }
+    });
     let jd = match &args.date {
         Some(d) => time::parse_date(d)?,
         None => time::jd_now(),
@@ -140,24 +159,41 @@ fn run(args: Args) -> Result<(), String> {
     }
 
     let graphics = std::env::var("COSMOSCOPE_GRAPHICS").unwrap_or(args.graphics.clone());
-    let want_hd = match graphics.as_str() {
-        "auto" => kitty::supported_by_env(),
-        "kitty" => true,
-        "off" => false,
-        other => {
-            return Err(format!(
-                "unknown graphics mode '{other}' (use auto, kitty or off)"
-            ))
-        }
-    };
-
-    if let Some(size) = &args.snapshot {
-        if want_hd {
-            app.hd = Some(parse_size(&args.cell).ok_or("cell size must look like 10x20")?);
-        }
-        return snapshot(&mut app, size, args.at);
+    if !matches!(graphics.as_str(), "auto" | "kitty" | "sixel" | "off") {
+        return Err(format!(
+            "unknown graphics mode '{graphics}' (use auto, kitty, sixel or off)"
+        ));
     }
 
+    if let Some(size) = &args.snapshot {
+        let mode = match graphics.as_str() {
+            "auto" if kitty::supported_by_env() => Graphics::Kitty,
+            "kitty" => Graphics::Kitty,
+            "sixel" => Graphics::Sixel,
+            _ => Graphics::Off,
+        };
+        if mode != Graphics::Off {
+            app.hd = Some(parse_size(&args.cell).ok_or("cell size must look like 10x20")?);
+        }
+        return snapshot(&mut app, size, args.at, mode);
+    }
+
+    console::check_console()?;
+    if graphics != "off" && console::reopen_in_windows_terminal() {
+        println!("cosmoscope opened in Windows Terminal.");
+        return Ok(());
+    }
+    let answers = console::ask_terminal();
+    let mode = match graphics.as_str() {
+        "kitty" => Graphics::Kitty,
+        "sixel" => Graphics::Sixel,
+        "off" => Graphics::Off,
+        // kitty images are placed to the pixel, and Windows cannot tell the cell size
+        _ if kitty::supported_by_env() && !cfg!(windows) => Graphics::Kitty,
+        _ if answers.sixel => Graphics::Sixel,
+        _ => Graphics::Off,
+    };
+    let want_hd = mode != Graphics::Off;
     textures::warm_up();
     // a small pool renders the images just as fast as one thread per core, while idle
     // workers spinning on every core would burn far more CPU
@@ -167,9 +203,19 @@ fn run(args: Args) -> Result<(), String> {
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(workers)
         .build_global();
-    let mut terminal = ratatui::init();
+    let mut terminal = init_terminal().map_err(|e| {
+        ratatui::restore();
+        e.to_string()
+    })?;
     let mut transfer = (kitty::Transfer::Direct, None);
-    if want_hd {
+    let mut sixel = None;
+    if mode == Graphics::Sixel {
+        // Windows Terminal draws sixel images as if a cell were 10x20 pixels, whatever the font
+        app.hd = Some(cell_size().unwrap_or((10, 20)));
+        sixel = Some(sixel::Sixel::new(
+            answers.background.unwrap_or(sixel::DEFAULT_BACKGROUND),
+        ));
+    } else if want_hd {
         app.hd = cell_size();
         if app.hd.is_some() {
             kitty::sweep_temp_files(false);
@@ -186,19 +232,46 @@ fn run(args: Args) -> Result<(), String> {
         hook(info);
     }));
     let mut gfx = kitty::Kitty::default();
+    let timer = console::FineTimer::new();
+    console::catch_break();
     let result = event_loop(
         &mut terminal,
         &mut app,
         &mut gfx,
+        sixel.as_mut(),
         transfer.0,
         transfer.1,
         args.fps,
     );
-    let _ = gfx.clear(&mut io::stdout());
+    drop(timer);
+    // an error can end the loop between the start and the end of a frame
+    let _ = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
+    let _ = gfx.clear(terminal.backend_mut());
     kitty::sweep_temp_files(true);
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result.map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Graphics {
+    Off,
+    Kitty,
+    Sixel,
+}
+
+/// Like `ratatui::init`, but frames are written through [`console::FrameOut`].
+fn init_terminal() -> io::Result<Term> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // the frame buffer drops what it holds once panicking, cursor command included
+        let _ = execute!(io::stdout(), EndSynchronizedUpdate, cursor::Show);
+        ratatui::restore();
+        hook(info);
+    }));
+    term::enable_raw_mode()?;
+    execute!(io::stdout(), term::EnterAlternateScreen)?;
+    Terminal::new(CrosstermBackend::new(console::FrameOut::default()))
 }
 
 /// Pixel size of one cell, when the terminal reports its window size in pixels.
@@ -217,38 +290,48 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
 }
 
 fn event_loop(
-    terminal: &mut DefaultTerminal,
+    terminal: &mut Term,
     app: &mut App,
     gfx: &mut kitty::Kitty,
+    mut sixel: Option<&mut sixel::Sixel>,
     mut transfer: kitty::Transfer,
     mut probe: Option<kitty::Probe>,
     fps: u32,
 ) -> io::Result<()> {
     let frame = Duration::from_secs_f64(1.0 / fps as f64);
     let mut last = Instant::now();
-    while !app.quit {
+    while !app.quit && !console::break_pressed() {
         let now = Instant::now();
         profile::time("update", || app.update((now - last).as_secs_f64().min(0.1)));
         last = now;
-        if app.hd.is_some() {
-            let mut out = io::stdout();
-            if let Some(verdict) = probe.as_mut().and_then(|p| p.poll(&mut out)) {
+        // Each frame is written in one piece, and terminals that support synchronized
+        // output show it only once it is complete, so nobody sees a half-drawn frame. Text
+        // and images land together, so planets never lag behind their labels.
+        queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+        if sixel.is_some() && app.hd.is_some() {
+            // sixel images cannot be moved: wipe last frame's, text and all
+            terminal.clear()?;
+        }
+        profile::time("draw", || terminal.draw(|f| ui::draw(f, app)))?;
+        if let (Some(sx), Some(cell)) = (sixel.as_deref_mut(), app.hd) {
+            let out = terminal.backend_mut();
+            profile::time("gfx", || sx.frame(out, &app.images, cell))?;
+        } else if app.hd.is_some() {
+            let out = terminal.backend_mut();
+            if let Some(verdict) = probe.as_mut().and_then(|p| p.poll(out)) {
                 transfer = verdict;
                 probe = None;
             }
-            // text and images land together, so planets never lag behind their labels
-            execute!(out, BeginSynchronizedUpdate)?;
-            profile::time("draw", || terminal.draw(|f| ui::draw(f, app)))?;
-            profile::time("gfx", || gfx.frame(&mut out, &app.images, transfer))?;
-            execute!(out, EndSynchronizedUpdate)?;
-        } else {
-            profile::time("draw", || terminal.draw(|f| ui::draw(f, app)))?;
+            profile::time("gfx", || gfx.frame(out, &app.images, transfer))?;
         }
+        execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
         profile::end_frame();
         let deadline = now + frame;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || !event::poll(left)? {
+            // keys that are already waiting are read even when the frame is due, so a burst
+            // from an input method is handled as one batch
+            if !event::poll(left)? {
                 break;
             }
             match event::read()? {
@@ -258,16 +341,17 @@ fn event_loop(
                 Event::Resize(..) if app.hd.is_some() => app.hd = cell_size().or(app.hd),
                 _ => {}
             }
-            if app.quit {
+            if app.quit || console::break_pressed() {
                 break;
             }
         }
+        app.end_input();
     }
     Ok(())
 }
 
 /// Simulate `at` seconds at 30 fps, render one frame off-screen and print it as ANSI text.
-fn snapshot(app: &mut App, size: &str, at: f64) -> Result<(), String> {
+fn snapshot(app: &mut App, size: &str, at: f64, mode: Graphics) -> Result<(), String> {
     let (w, h) = size
         .split_once('x')
         .and_then(|(w, h)| Some((w.parse::<u16>().ok()?, h.parse::<u16>().ok()?)))
@@ -301,8 +385,12 @@ fn snapshot(app: &mut App, size: &str, at: f64) -> Result<(), String> {
     }
     let mut bytes = out.into_bytes();
     // with graphics, the image commands follow the text, exactly as a terminal would get them
-    kitty::Kitty::default()
-        .frame(&mut bytes, &app.images, kitty::Transfer::Direct)
-        .map_err(|e| e.to_string())?;
+    let images = match (mode, app.hd) {
+        (Graphics::Sixel, Some(cell)) => {
+            sixel::Sixel::new(sixel::DEFAULT_BACKGROUND).frame(&mut bytes, &app.images, cell)
+        }
+        _ => kitty::Kitty::default().frame(&mut bytes, &app.images, kitty::Transfer::Direct),
+    };
+    images.map_err(|e| e.to_string())?;
     io::stdout().write_all(&bytes).map_err(|e| e.to_string())
 }

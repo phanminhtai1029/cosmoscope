@@ -82,6 +82,11 @@ pub struct App {
     pub fact_since: f64,
     pub hits: Vec<Hit>,
     drag: Option<Drag>,
+    /// A Backspace that may still turn out to be an input method's (see `key`); true once
+    /// a whole batch of input has gone by without telling.
+    pending_back: Option<bool>,
+    /// The last character typed came from an input method (it is not ASCII).
+    last_ime: bool,
     /// Index of the current tour stop and when it began.
     pub tour: Option<(usize, f64)>,
     /// Cell size in pixels when drawing bodies as images (HD mode).
@@ -154,6 +159,8 @@ impl App {
             fact_since: 0.0,
             hits: Vec::new(),
             drag: None,
+            pending_back: None,
+            last_ime: false,
             tour: None,
             hd: None,
             images: Vec::new(),
@@ -327,13 +334,37 @@ impl App {
 
     pub fn key(&mut self, key: KeyEvent) {
         let n = self.bodies.len();
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+        // with Caps Lock on, Windows reports Ctrl+C as Ctrl+'C'
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+        {
             self.quit = true;
             return;
+        }
+        // Vietnamese input methods (UniKey, EVKey) left in Vietnamese mode rewrite what was
+        // typed with Backspaces: "d d" arrives as 'd', Backspace, 'đ', and a third 'd' undoes
+        // it with Backspace, 'd', 'd'. Their Backspaces must not leave the planet, so a
+        // Backspace waits for what comes next.
+        let ime = matches!(key.code, KeyCode::Char(c) if !c.is_ascii());
+        if self.pending_back.is_some() && key.code != KeyCode::Backspace {
+            self.pending_back = None;
+            let rewrite = ime || (self.last_ime && matches!(key.code, KeyCode::Char(_)));
+            if !rewrite {
+                self.unfocus();
+            }
+        }
+        match key.code {
+            KeyCode::Char(_) => self.last_ime = ime,
+            KeyCode::Backspace => {}
+            _ => self.last_ime = false,
         }
         // any other key takes the controls back from the tour
         if !matches!(key.code, KeyCode::Char('T')) {
             self.tour = None;
+        }
+        // letters typed by an input method are not commands
+        if ime {
+            return;
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => self.quit = true,
@@ -360,7 +391,9 @@ impl App {
                 Some(i) if i == self.selected => self.unfocus(),
                 _ => self.focus(self.selected),
             },
-            KeyCode::Backspace => self.unfocus(),
+            KeyCode::Backspace => {
+                self.pending_back.get_or_insert(false);
+            }
             KeyCode::Char(' ') => self.paused = !self.paused,
             KeyCode::Char(']') | KeyCode::Char('.') => {
                 self.speed = (self.speed + 1).min(SPEEDS.len() - 1)
@@ -385,7 +418,23 @@ impl App {
         }
     }
 
+    /// All input that arrived together has been handled. A Backspace with nothing after it
+    /// takes effect one batch later, in case an input method's letter is still on its way.
+    pub fn end_input(&mut self) {
+        match self.pending_back {
+            Some(false) => self.pending_back = Some(true),
+            Some(true) => {
+                self.pending_back = None;
+                self.unfocus();
+            }
+            None => {}
+        }
+    }
+
     pub fn mouse(&mut self, ev: MouseEvent) {
+        if self.pending_back.take().is_some() {
+            self.unfocus();
+        }
         if !matches!(ev.kind, MouseEventKind::Moved) {
             self.tour = None;
         }
@@ -445,6 +494,81 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+        app.key(KeyEvent::new(code, modifiers));
+    }
+
+    #[test]
+    fn ctrl_c_quits_with_caps_lock_on() {
+        let mut app = App::new(time::parse_date("2026-10-22").unwrap());
+        press(&mut app, KeyCode::Char('C'), KeyModifiers::CONTROL);
+        assert!(app.quit);
+    }
+
+    fn earth() -> App {
+        let mut app = App::new(time::parse_date("2026-10-22").unwrap());
+        app.focus(3);
+        app
+    }
+
+    #[test]
+    fn backspace_still_leaves_a_planet() {
+        let mut app = earth();
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        app.end_input();
+        assert_eq!(app.focused, Some(3), "waits one batch for an input method");
+        app.end_input();
+        assert_eq!(app.focused, None);
+        // a key right after it does not overtake it
+        let mut app = earth();
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.focused, Some(3), "left, then flew back in");
+        let mut app = earth();
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(app.focused, None);
+    }
+
+    /// UniKey in Telex mode turns a second 'd' into Backspace + 'đ', and a third into
+    /// Backspace + "dd"; neither Backspace is the user's.
+    #[test]
+    fn input_method_backspaces_do_not_leave_the_planet() {
+        let mut app = earth();
+        let az = app.goal_az;
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Backspace,
+            KeyCode::Char('đ'),
+            KeyCode::Backspace,
+            KeyCode::Char('d'),
+            KeyCode::Char('d'),
+            // "toan s" rewrites more than one letter
+            KeyCode::Backspace,
+            KeyCode::Backspace,
+            KeyCode::Char('á'),
+            KeyCode::Char('n'),
+        ] {
+            press(&mut app, code, KeyModifiers::NONE);
+        }
+        app.end_input();
+        app.end_input();
+        assert_eq!(app.focused, Some(3));
+        assert!(
+            (app.goal_az - az - 0.75).abs() < 1e-9,
+            "the plain 'd's still rotate"
+        );
+    }
+
+    #[test]
+    fn other_letters_are_no_commands_but_stop_the_tour() {
+        let mut app = earth();
+        app.start_tour();
+        let speed = app.speed;
+        press(&mut app, KeyCode::Char('ư'), KeyModifiers::NONE);
+        assert_eq!((app.tour, app.speed), (None, speed));
+    }
 
     /// Fly to Earth and back at 30 fps and check that the camera never jumps between frames.
     #[test]

@@ -15,7 +15,7 @@
 
 ## Features
 
-- **HD planets.** In terminals that speak the kitty graphics protocol (Ghostty, kitty and WezTerm on Linux and macOS; Konsole with `--graphics kitty`), the Sun, planets and rings are drawn as real anti-aliased images with true transparency. The text layer still carries the orbits, stars, labels and panels, so it stays a terminal app. Every other terminal gets a carefully tuned text renderer instead.
+- **HD planets.** In terminals that speak the kitty graphics protocol (Ghostty, kitty and WezTerm on Linux and macOS; Konsole with `--graphics kitty`), and in Windows Terminal on Windows 10 and 11 (as sixel images), the Sun, planets and rings are drawn as real anti-aliased images with true transparency. The text layer still carries the orbits, stars, labels and panels, so it stays a terminal app. Every other terminal gets a carefully tuned text renderer instead.
 - **The real sky, right now.** Planet positions come from NASA JPL orbital elements for the current date, and they match JPL Horizons to within 0.15 degrees. Each planet's spin axis comes from the IAU, so Saturn's rings tilt the way they really do.
 - **Time travel.** Run time from real time up to 10 years per second, forwards or backwards, or jump to any date from the year 1000 to 3000: `--date 1969-07-20`.
 - **Fly to any world.** Press <kbd>Enter</kbd> and the camera glides in close, lit by the Sun from its true direction. Every body wears a real surface map from spacecraft data.
@@ -62,7 +62,7 @@ In PowerShell:
 ```powershell
 irm https://raw.githubusercontent.com/phanminhtai1029/cosmoscope/main/install/install.ps1 | iex
 ```
-The binary goes to `%LOCALAPPDATA%\Programs\cosmoscope` and is added to your user `PATH`. Open a new terminal afterwards. [Windows Terminal](https://aka.ms/terminal) is recommended.
+The binary goes to `%LOCALAPPDATA%\Programs\cosmoscope` and is added to your user `PATH`, and `cosmoscope` works straight away in the same window. Planets are drawn in HD in [Windows Terminal](https://aka.ms/terminal), which Windows 11 has built in; on Windows 10 the installer offers to install it for you (through winget). Started from the classic console window, cosmoscope reopens itself in Windows Terminal.
 
 ### With Cargo
 If you have Rust 1.88 or newer:
@@ -78,7 +78,7 @@ Grab a binary from the [latest release](https://github.com/phanminhtai1029/cosmo
 | `cosmoscope-linux-x86_64` | Linux x86_64 (static, any distro) |
 | `cosmoscope-linux-arm64` | Linux ARM64, e.g. Raspberry Pi 4/5 (static) |
 | `cosmoscope-macos-universal` | macOS 11+, Apple Silicon and Intel |
-| `cosmoscope-windows-x86_64.exe` | Windows 10/11 x64; also runs on ARM through emulation |
+| `cosmoscope-windows-x86_64.exe` | Windows 10/11 x64; also runs on Windows 11 on ARM through emulation |
 
 If you download through a browser, the system may block the file the first time:
 - **macOS**: run `xattr -d com.apple.quarantine cosmoscope-macos-universal`.
@@ -112,8 +112,9 @@ cosmoscope --no-panel --no-rotate
 | `--tour` | Guided tour; any key takes the controls back |
 | `--no-panel` | Hide the info panel; <kbd>i</kbd> toggles it |
 | `--no-rotate` | Keep the camera still; <kbd>r</kbd> toggles it |
-| `--graphics <MODE>` | `auto` (default: HD when the terminal supports it), `kitty` (force HD) or `off` (text only); also `COSMOSCOPE_GRAPHICS` |
+| `--graphics <MODE>` | `auto` (default: HD when the terminal supports it), `kitty` or `sixel` (force HD with that protocol) or `off` (text only); also `COSMOSCOPE_GRAPHICS` |
 | `--colors <MODE>` | `auto` (default), `truecolor` or `256`; the `COSMOSCOPE_COLORS` variable does the same |
+| `--glyphs <SET>` | `auto` (default: `basic` in the classic Windows console), `full` or `basic` (only glyphs that Consolas and Lucida Console have); also `COSMOSCOPE_GLYPHS` |
 | `--fps <N>` | Frame rate, 5-120 (default 30). Lower it over slow SSH links |
 
 ### Controls
@@ -138,12 +139,13 @@ cosmoscope --no-panel --no-rotate
 
 ## Terminal tips
 
-- **For the best picture, use a terminal with the kitty graphics protocol.** Good choices are [Ghostty](https://ghostty.org), [kitty](https://sw.kovidgoyal.net/kitty/) or [WezTerm](https://wezfurlong.org/wezterm/), on Linux or macOS. HD switches on automatically, and the status bar shows **HD**. Inside tmux or screen, images do not pass through, so cosmoscope falls back to text.
+- **For the best picture, use a terminal with the kitty graphics protocol.** Good choices are [Ghostty](https://ghostty.org), [kitty](https://sw.kovidgoyal.net/kitty/) or [WezTerm](https://wezfurlong.org/wezterm/), on Linux or macOS, and [Windows Terminal](https://aka.ms/terminal) 1.22 or newer on Windows. HD switches on automatically, and the status bar shows **HD**. Inside tmux or screen, images do not pass through, so cosmoscope falls back to text.
   - Ubuntu: `sudo snap install ghostty --classic`
   - macOS: `brew install --cask ghostty`
-- **HD needs a little more power.** It uses roughly half to one CPU core (most when flying close to a spinning Earth), plus some work in the terminal itself. On a local machine, images go through temporary files that the terminal reads directly. Over SSH they are sent inline, so use `--graphics off` or a lower `--fps` on slow links.
+- **HD needs a little more power.** It uses roughly half to one CPU core (most when flying close to a spinning Earth), plus some work in the terminal itself. Windows Terminal is sent every image again each frame (sixel cannot move an image), so it takes about half a core of its own. On a local machine, images go through temporary files that the terminal reads directly. Over SSH they are sent inline, so use `--graphics off` or a lower `--fps` on slow links.
 - **Fonts.** Bodies are drawn with half blocks (`▀▄`) and orbits with braille dots (`⣿`). Any modern monospace font has them: JetBrains Mono, Cascadia Code, Fira Code, DejaVu Sans Mono, SF Mono, Menlo or Nerd Fonts.
 - **Colour.** Most terminals get 24-bit colour automatically, including GNOME Terminal, Konsole, kitty, Alacritty, WezTerm, Ghostty, iTerm2 and Windows Terminal. macOS Terminal.app gets the 256-colour fallback. Inside tmux, either enable RGB (`set -as terminal-features ",*:RGB"`) or run with `--colors truecolor`.
+- **Windows.** [Windows Terminal](https://aka.ms/terminal) (the default on Windows 11) draws the planets as sixel images. When you start cosmoscope from the classic console window (the default on Windows 10), it reopens itself in Windows Terminal if that is installed; set `COSMOSCOPE_NO_WT=1` to stay put. The classic console cannot show images, and its fonts, such as Consolas, lack some block glyphs, so cosmoscope draws planet edges and symbols there with glyphs those fonts have; `--glyphs full` turns that off if you have set a font with full coverage, like Cascadia Mono. Git Bash's own window (MinTTY) does not pass keys to console programs: open Git Bash as a Windows Terminal profile instead (`winpty cosmoscope` also works, but only in 16 colours). A Vietnamese input method (UniKey, EVKey) left in Vietnamese mode no longer throws you out of a planet view, but it swallows some letter keys and `[` `]`; switch it to English (Ctrl+Shift in UniKey), or use `,` and `.` for the speed.
 - **Size.** It works from 80×24 upwards, and it looks best at 120×40 or larger with a small font.
 - **SSH.** Every frame is fully animated, so on slow links lower the frame rate with `--fps 15`, and use `--graphics off` if you are in a kitty-protocol terminal.
 
@@ -160,7 +162,7 @@ cosmoscope --no-panel --no-rotate
 
 ## Roadmap
 
-- **HD everywhere**: Sixel and iTerm2 inline images, plus Windows support, so Windows Terminal, foot and iTerm2 get HD too.
+- **HD everywhere**: detect sixel on Linux and macOS too (foot, mlterm; it works there today with `--graphics sixel`), and iTerm2 inline images.
 - **v0.2**: moons (the Moon, the Galilean moons, Titan), Mars' polar seasons, Uranus and Neptune ring detail, comets.
 - **v0.3**: a size comparison view, "your weight on ..." and "travel time to ..." calculators, `cosmoscope --fact` for your shell greeting.
 - **Later**: zoom out past the Kuiper belt to the nearest stars, the Milky Way, the Local Group and the cosmic web.
@@ -172,11 +174,14 @@ Ideas and pull requests are welcome. Planet facts and data live in [`assets/bodi
 ```
 src/
   main.rs        command line, terminal setup, event loop, --snapshot
+  console.rs     Windows console details: whole-frame writes, 1 ms timer, terminal queries,
+                 reopening in Windows Terminal, glyph and pipe checks
   app.rs         state: time, selection, camera, tour, input
   render.rs      software renderer: shared body shading, text back end (block/quadrant glyphs,
                  braille orbits, sky) and HD back end (anti-aliased RGBA sprites)
   kitty.rs       kitty graphics protocol: images moved to the pixel every frame, redrawn only
                  when they change, sent through temp files locally (zlib + base64 over SSH)
+  sixel.rs       sixel images (Windows Terminal): a palette per picture, resent every frame
   ui.rs          ratatui layout: info panel, status bar, help
   ephemeris.rs   JPL orbital elements and Kepler's equation (with Horizons tests)
   time.rs        Julian dates and calendar conversion

@@ -1,0 +1,4 @@
+# Link the C runtime statically on Windows, so cosmoscope.exe starts on a fresh Windows 10/11
+# without the Visual C++ Redistributable (VCRUNTIME140.dll).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
