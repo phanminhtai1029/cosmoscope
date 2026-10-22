@@ -431,6 +431,7 @@ fn place(s: Sprite, origin: Rect, clip: Rect, cell: (u32, u32)) -> Option<Placed
         h: s.h,
         rgba: s.rgba,
         keep: s.keep,
+        z: s.z,
     })
 }
 
@@ -564,6 +565,7 @@ mod tests {
             h,
             rgba: vec![0; (w * h * 4) as usize],
             keep: false,
+            z: 1,
         }
     }
 

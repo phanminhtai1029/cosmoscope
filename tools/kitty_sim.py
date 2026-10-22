@@ -32,7 +32,7 @@ def main():
     ansi2png.main(t.name, a.dst, bg)
     os.unlink(t.name)
     img = Image.open(a.dst).convert("RGBA")
-    cursor, pending, keys, n, images = (1, 1), [], {}, 0, {}
+    cursor, pending, keys, n, images, placed = (1, 1), [], {}, 0, {}, {}
     for m in CMD.finditer(cmds):
         if m.group(1):
             cursor = (int(m.group(1)), int(m.group(2)))
@@ -48,7 +48,8 @@ def main():
             sw, sh = int(k.get(b"w", pic.width)), int(k.get(b"h", pic.height))
             pic = pic.crop((sx, sy, sx + sw, sy + sh))
             pos = ((cursor[1] - 1) * cw + int(k.get(b"X", 0)), (cursor[0] - 1) * ch + int(k.get(b"Y", 0)))
-            img.alpha_composite(pic, pos)
+            # like a real terminal: stack by z-index, then by image id, not by arrival order
+            placed[(int(k[b"i"]), int(k.get(b"p", 0)))] = (int(k.get(b"z", 0)), int(k[b"i"]), pic, pos)
             n += 1
             continue
         if act:
@@ -60,6 +61,8 @@ def main():
                 data = zlib.decompress(data)
             w, h = int(keys[b"s"]), int(keys[b"v"])
             images[int(keys[b"i"])] = Image.frombytes("RGBA", (w, h), data)
+    for z, i, pic, pos in sorted(placed.values(), key=lambda p: (p[0], p[1])):
+        img.alpha_composite(pic, pos)
     img.convert("RGB").save(a.dst)
     print(f"composited {n} placements", file=sys.stderr)
 

@@ -30,6 +30,8 @@ pub struct Placed {
     pub rgba: Vec<u8>,
     /// Reuse the picture already on screen for this slot; only move it.
     pub keep: bool,
+    /// Stacking order: higher is drawn on top (all above the text).
+    pub z: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,11 +114,12 @@ fn place(out: &mut impl Write, id: u32, p: &Placed) -> io::Result<()> {
     let (sx, sy, sw, sh) = p.src;
     write!(
         out,
-        "\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x={sx},y={sy},w={sw},h={sh},X={},Y={},C=1,z=1,q=2\x1b\\",
+        "\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x={sx},y={sy},w={sw},h={sh},X={},Y={},C=1,z={},q=2\x1b\\",
         p.row as u32 + 1,
         p.col as u32 + 1,
         p.x_off,
-        p.y_off
+        p.y_off,
+        p.z.max(1)
     )
 }
 
@@ -281,6 +284,7 @@ mod tests {
             h: 1,
             rgba: if keep { vec![] } else { vec![255; 4] },
             keep,
+            z: 3,
         }
     }
 

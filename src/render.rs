@@ -611,14 +611,19 @@ impl Scene {
             order.retain(|o| o.0 == f || o.0 == 0 || o.2 > fd * 1.05);
         }
         let mut sprites = Vec::new();
-        for &(i, pos, _) in &order {
+        // `order` runs from far to near, so the running count is the stacking order: each body
+        // sits above everything farther away (one image per body, so occlusion is per body)
+        for (rank, &(i, pos, _)) in order.iter().enumerate() {
             let Some(g) = body_geom(&view, fr, i, pos) else {
                 continue;
             };
             match fr.hd {
                 Some(cell) => {
                     cv.reserve(g.cx, g.cy * 0.5, g.sr, g.sr * 0.5);
-                    sprites.extend(body_sprite(&g, i as u32, cell, fr.sent));
+                    sprites.extend(body_sprite(&g, i as u32, cell, fr.sent).map(|s| Sprite {
+                        z: 1 + rank as i32,
+                        ..s
+                    }));
                 }
                 None => draw_body(cv, &g),
             }
@@ -1112,6 +1117,8 @@ pub struct Sprite {
     pub rgba: Vec<u8>,
     /// The picture has not changed enough to redraw: just move the one on screen.
     pub keep: bool,
+    /// Stacking order among images: nearer bodies get higher values.
+    pub z: i32,
 }
 
 /// Images bigger than this are shaded at half resolution and smoothly upscaled, which keeps
@@ -1156,6 +1163,7 @@ fn body_sprite(
                 h: prev.h,
                 rgba: Vec::new(),
                 keep: true,
+                z: 1,
             });
         }
     }
@@ -1239,6 +1247,7 @@ fn body_sprite(
         h: size,
         rgba,
         keep: false,
+        z: 1,
     })
 }
 
@@ -1432,6 +1441,46 @@ mod tests {
         // 00:00 UTC: the Sun is over the Pacific near the date line
         let (_, lon) = subsolar(crate::time::parse_date("2026-06-21T00:00").unwrap());
         assert!((lon.abs() - 180.0).abs() < 2.5, "lon {lon}");
+    }
+
+    #[test]
+    fn nearer_bodies_are_stacked_on_top_in_hd() {
+        let bodies = crate::data::load();
+        let cam = Camera {
+            target: V3::ZERO,
+            dist: 8.8,
+            az: -1.2,
+            el: 0.5,
+        };
+        let fr = Frame {
+            bodies: &bodies,
+            jd: crate::time::parse_date("2026-10-22").unwrap(),
+            spin_jd: 0.0,
+            t: 0.0,
+            cam,
+            selected: 3,
+            focused: None,
+            center_x: 80.0,
+            hd: Some((10, 20)),
+            sent: None,
+        };
+        let mut cv = Canvas::new(160, 50);
+        let (_, sprites) = Scene::new().render(&mut cv, &fr);
+        let view = View::new(&cam, 100.0, 80.0);
+        let depth = |slot: u32| view.project(body_position(slot as usize, fr.jd)).unwrap().2;
+        assert!(sprites.len() >= 5);
+        for a in &sprites {
+            for b in &sprites {
+                if depth(a.slot) < depth(b.slot) {
+                    assert!(
+                        a.z > b.z,
+                        "body {} is nearer than {} but stacked below it",
+                        a.slot,
+                        b.slot
+                    );
+                }
+            }
+        }
     }
 
     #[test]
