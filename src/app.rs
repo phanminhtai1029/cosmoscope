@@ -83,6 +83,12 @@ pub struct App {
     drag: Option<Drag>,
     /// Index of the current tour stop and when it began.
     pub tour: Option<(usize, f64)>,
+    /// Cell size in pixels when drawing bodies as images (HD mode).
+    pub hd: Option<(u32, u32)>,
+    /// Images prepared by the last draw, for the graphics back end.
+    pub images: Vec<crate::kitty::Placed>,
+    /// Last redraw of each image slot.
+    pub sent: std::collections::HashMap<u32, crate::render::Sent>,
     pub quit: bool,
 }
 
@@ -127,6 +133,9 @@ impl App {
             hits: Vec::new(),
             drag: None,
             tour: None,
+            hd: None,
+            images: Vec::new(),
+            sent: std::collections::HashMap::new(),
             quit: false,
         }
     }

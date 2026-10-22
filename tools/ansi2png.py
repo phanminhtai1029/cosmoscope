@@ -9,6 +9,7 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 CW, CH = 8, 16
+FONT_SIZE = 13
 BG = (11, 12, 20)
 FONTS = ["/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/System/Library/Fonts/Menlo.ttc",
          "C:/Windows/Fonts/consola.ttf"]
@@ -21,7 +22,7 @@ BRAILLE = [(0, 0, 0x01), (0, 1, 0x02), (0, 2, 0x04), (1, 0, 0x08), (1, 1, 0x10),
 def font():
     for f in FONTS:
         try:
-            return ImageFont.truetype(f, 13)
+            return ImageFont.truetype(f, FONT_SIZE)
         except OSError:
             pass
     return ImageFont.load_default()

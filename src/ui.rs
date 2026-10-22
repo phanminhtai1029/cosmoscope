@@ -11,8 +11,9 @@ use ratatui::Frame;
 
 use crate::app::{App, SPEEDS};
 use crate::ephemeris;
+use crate::kitty::Placed;
 use crate::math::Rgb;
-use crate::render::{self, Canvas};
+use crate::render::{self, Canvas, Sprite};
 
 thread_local! {
     static CARD: std::cell::RefCell<Canvas> = std::cell::RefCell::new(Canvas::new(1, 1));
@@ -91,15 +92,49 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         selected: app.selected,
         focused: app.focused,
         center_x: (main.width - panel_w) as f64 * 0.5,
+        // images would cover the help box, so bodies fall back to text while it is open
+        hd: app.hd.filter(|_| !app.show_help),
+        sent: Some(&app.sent),
     };
     app.canvas.label_limit = (main.width - panel_w) as usize;
-    app.hits = app.scene.render(&mut app.canvas, &frame);
+    let (hits, sprites) = app.scene.render(&mut app.canvas, &frame);
+    app.hits = hits;
+    let redrawn: Vec<(u32, render::Sent)> = sprites
+        .iter()
+        .filter(|s| !s.keep)
+        .map(|s| {
+            (
+                s.slot,
+                render::Sent {
+                    col: s.col,
+                    row: s.row,
+                    cols: s.cols,
+                    rows: s.rows,
+                    t: app.t,
+                },
+            )
+        })
+        .collect();
+    let space = Rect::new(main.x, main.y, main.width - panel_w, main.height);
+    let mut images: Vec<Placed> = sprites
+        .into_iter()
+        .filter_map(|s| place(s, main, space))
+        .collect();
     f.render_widget(SpaceView(&app.canvas), main);
 
     if panel_w > 0 {
         let panel = Rect::new(main.right() - panel_w, main.y, panel_w, main.height);
-        draw_panel(f, app, panel, &frame_for_card(app, main.width - panel_w));
+        if let Some((card, sent)) =
+            draw_panel(f, app, panel, &frame_for_card(app, main.width - panel_w))
+        {
+            images.push(card);
+            if let Some(sent) = sent {
+                app.sent.insert(render::CARD_SLOT, sent);
+            }
+        }
     }
+    app.sent.extend(redrawn);
+    app.images = images;
     draw_status(f, app, status);
     if app.show_help {
         draw_help(f, main);
@@ -116,6 +151,8 @@ fn frame_for_card(app: &App, _w: u16) -> render::Frame<'_> {
         selected: app.selected,
         focused: app.focused,
         center_x: 0.0,
+        hd: app.hd.filter(|_| !app.show_help),
+        sent: Some(&app.sent),
     }
 }
 
@@ -200,7 +237,12 @@ fn bar(frac: f64, width: usize, col: Rgb) -> Vec<Span<'static>> {
     ]
 }
 
-fn draw_panel(f: &mut Frame, app: &App, area: Rect, card_frame: &render::Frame) {
+fn draw_panel(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    card_frame: &render::Frame,
+) -> Option<(Placed, Option<render::Sent>)> {
     let i = app.selected;
     let b = &app.bodies[i];
     let col = b.rgb();
@@ -324,6 +366,7 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect, card_frame: &render::Frame) 
         Constraint::Length(1),
     ])
     .areas(inner);
+    let mut card = None;
     if card_h > 0 {
         CARD.with(|c| {
             let mut cv = c.borrow_mut();
@@ -331,7 +374,16 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect, card_frame: &render::Frame) 
             if app.focused == Some(i) {
                 render::render_minimap(&mut cv, card_frame, i);
             } else {
-                render::render_card(&mut cv, &app.scene, card_frame, i);
+                card = render::render_card(&mut cv, &app.scene, card_frame, i).and_then(|s| {
+                    let sent = (!s.keep).then_some(render::Sent {
+                        col: s.col,
+                        row: s.row,
+                        cols: s.cols,
+                        rows: s.rows,
+                        t: app.t,
+                    });
+                    place(s, card_area, card_area).map(|p| (p, sent))
+                });
             }
             f.render_widget(SpaceView(&cv), card_area);
         });
@@ -347,6 +399,56 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect, card_frame: &render::Frame) 
         Paragraph::new(Span::styled(format!(" {dots}"), st(DIM))),
         dots_area,
     );
+    card
+}
+
+/// Turn a sprite (cells relative to `origin`) into an absolute placement, cropped to `clip`.
+fn place(s: Sprite, origin: Rect, clip: Rect) -> Option<Placed> {
+    let (c0, r0) = (origin.x as i64 + s.col, origin.y as i64 + s.row);
+    let (c1, r1) = (c0 + s.cols as i64, r0 + s.rows as i64);
+    let (k0, k1) = (c0.max(clip.x as i64), c1.min(clip.right() as i64));
+    let (q0, q1) = (r0.max(clip.y as i64), r1.min(clip.bottom() as i64));
+    if k0 >= k1 || q0 >= q1 {
+        return None;
+    }
+    if s.keep {
+        let (cols, rows) = ((k1 - k0) as u32, (q1 - q0) as u32);
+        return Some(Placed {
+            slot: s.slot,
+            col: k0 as u16,
+            row: q0 as u16,
+            cols,
+            rows,
+            w: 0,
+            h: 0,
+            rgba: Vec::new(),
+            keep: true,
+        });
+    }
+    let (pw, ph) = ((s.w / s.cols) as usize, (s.h / s.rows) as usize);
+    let (x0, y0) = ((k0 - c0) as usize * pw, (q0 - r0) as usize * ph);
+    let (w, h) = ((k1 - k0) as usize * pw, (q1 - q0) as usize * ph);
+    let rgba = if w == s.w as usize && h == s.h as usize {
+        s.rgba
+    } else {
+        let mut out = Vec::with_capacity(w * h * 4);
+        for y in y0..y0 + h {
+            let start = (y * s.w as usize + x0) * 4;
+            out.extend_from_slice(&s.rgba[start..start + w * 4]);
+        }
+        out
+    };
+    Some(Placed {
+        slot: s.slot,
+        col: k0 as u16,
+        row: q0 as u16,
+        cols: (k1 - k0) as u32,
+        rows: (q1 - q0) as u32,
+        w: w as u32,
+        h: h as u32,
+        rgba,
+        keep: false,
+    })
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
@@ -368,6 +470,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         left.push(Span::styled(
             "  positions approximate outside 1800-2050",
             st(WARN),
+        ));
+    }
+    if app.hd.is_some() {
+        left.push(Span::styled(" │ ", st(DIM)));
+        left.push(Span::styled(
+            "HD",
+            st(Rgb::hex(0x7ee2a8)).add_modifier(Modifier::BOLD),
         ));
     }
     if app.tour.is_some() {
@@ -457,4 +566,51 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ),
         r,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sprite(col: i64, row: i64, cols: u32, rows: u32) -> Sprite {
+        let (w, h) = (cols * 2, rows * 3);
+        let rgba = (0..w * h).flat_map(|k| [k as u8, 0, 0, 255]).collect();
+        Sprite {
+            slot: 1,
+            col,
+            row,
+            cols,
+            rows,
+            w,
+            h,
+            rgba,
+            keep: false,
+        }
+    }
+
+    #[test]
+    fn place_crops_to_the_clip_rect() {
+        // 4x2 cells at (8, 1) inside an area at x=2, clipped where the panel starts (x < 12)
+        let p = place(
+            sprite(8, 1, 4, 2),
+            Rect::new(2, 0, 20, 10),
+            Rect::new(2, 0, 10, 10),
+        )
+        .unwrap();
+        assert_eq!((p.col, p.row, p.cols, p.rows), (10, 1, 2, 2));
+        assert_eq!((p.w, p.h), (4, 6));
+        assert_eq!(p.rgba.len(), 4 * 6 * 4);
+        // first kept pixel is column 0 of the original row 0
+        assert_eq!(p.rgba[0], 0);
+    }
+
+    #[test]
+    fn place_drops_sprites_outside() {
+        assert!(place(
+            sprite(30, 0, 2, 2),
+            Rect::new(0, 0, 20, 10),
+            Rect::new(0, 0, 20, 10)
+        )
+        .is_none());
+    }
 }

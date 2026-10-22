@@ -3,6 +3,7 @@
 mod app;
 mod data;
 mod ephemeris;
+mod kitty;
 mod math;
 mod render;
 mod time;
@@ -17,6 +18,7 @@ use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
 };
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{self as term, BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::style::Color;
 use ratatui::{DefaultTerminal, Terminal};
 
@@ -52,6 +54,13 @@ struct Args {
     /// Colour mode: auto, truecolor or 256
     #[arg(long, default_value = "auto")]
     colors: String,
+    /// Draw planets as real images: auto (when the terminal speaks the kitty graphics
+    /// protocol: kitty, Ghostty, WezTerm), kitty (force it) or off
+    #[arg(long, default_value = "auto")]
+    graphics: String,
+    /// Cell size in pixels for --snapshot with graphics, e.g. 10x20
+    #[arg(long, hide = true, default_value = "10x20")]
+    cell: String,
     /// Frames per second
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(5..=120))]
     fps: u32,
@@ -128,31 +137,80 @@ fn run(args: Args) -> Result<(), String> {
         app.focus(i);
     }
 
+    let graphics = std::env::var("COSMOSCOPE_GRAPHICS").unwrap_or(args.graphics.clone());
+    let want_hd = match graphics.as_str() {
+        "auto" => kitty::supported_by_env(),
+        "kitty" => true,
+        "off" => false,
+        other => {
+            return Err(format!(
+                "unknown graphics mode '{other}' (use auto, kitty or off)"
+            ))
+        }
+    };
+
     if let Some(size) = &args.snapshot {
+        if want_hd {
+            app.hd = Some(parse_size(&args.cell).ok_or("cell size must look like 10x20")?);
+        }
         return snapshot(&mut app, size, args.at);
     }
 
     let mut terminal = ratatui::init();
+    if want_hd {
+        app.hd = cell_size();
+    }
     let _ = execute!(io::stdout(), EnableMouseCapture);
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(io::stdout(), DisableMouseCapture);
         hook(info);
     }));
-    let result = event_loop(&mut terminal, &mut app, args.fps);
+    let mut gfx = kitty::Kitty::default();
+    let result = event_loop(&mut terminal, &mut app, &mut gfx, args.fps);
+    let _ = gfx.clear(&mut io::stdout());
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result.map_err(|e| e.to_string())
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, fps: u32) -> io::Result<()> {
+/// Pixel size of one cell, when the terminal reports its window size in pixels.
+fn cell_size() -> Option<(u32, u32)> {
+    let ws = term::window_size().ok()?;
+    if ws.width == 0 || ws.height == 0 || ws.columns == 0 || ws.rows == 0 {
+        return None;
+    }
+    let cell = ((ws.width / ws.columns) as u32, (ws.height / ws.rows) as u32);
+    Some(cell).filter(|&(w, h)| w >= 4 && h >= 8)
+}
+
+fn parse_size(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.split_once('x')?;
+    Some((w.parse().ok()?, h.parse().ok()?))
+}
+
+fn event_loop(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    gfx: &mut kitty::Kitty,
+    fps: u32,
+) -> io::Result<()> {
     let frame = Duration::from_secs_f64(1.0 / fps as f64);
     let mut last = Instant::now();
     while !app.quit {
         let now = Instant::now();
         app.update((now - last).as_secs_f64().min(0.1));
         last = now;
-        terminal.draw(|f| ui::draw(f, app))?;
+        if app.hd.is_some() {
+            // text and images land together, so planets never lag behind their labels
+            let mut out = io::stdout();
+            execute!(out, BeginSynchronizedUpdate)?;
+            terminal.draw(|f| ui::draw(f, app))?;
+            gfx.frame(&mut out, &app.images)?;
+            execute!(out, EndSynchronizedUpdate)?;
+        } else {
+            terminal.draw(|f| ui::draw(f, app))?;
+        }
         let deadline = now + frame;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -163,6 +221,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, fps: u32) -> io::Re
                 // Windows also reports key releases; act on presses only
                 Event::Key(k) if k.kind == KeyEventKind::Press => app.key(k),
                 Event::Mouse(m) => app.mouse(m),
+                Event::Resize(..) if app.hd.is_some() => app.hd = cell_size().or(app.hd),
                 _ => {}
             }
             if app.quit {
@@ -206,7 +265,10 @@ fn snapshot(app: &mut App, size: &str, at: f64) -> Result<(), String> {
         }
         out.push_str("\x1b[0m\n");
     }
-    io::stdout()
-        .write_all(out.as_bytes())
-        .map_err(|e| e.to_string())
+    let mut bytes = out.into_bytes();
+    // with graphics, the image commands follow the text, exactly as a terminal would get them
+    kitty::Kitty::default()
+        .frame(&mut bytes, &app.images)
+        .map_err(|e| e.to_string())?;
+    io::stdout().write_all(&bytes).map_err(|e| e.to_string())
 }

@@ -16,6 +16,7 @@ ratatui = "0.29"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+flate2 = "1"
 
 [profile.release]
 opt-level = 3

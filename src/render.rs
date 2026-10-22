@@ -36,6 +36,8 @@ pub struct Canvas {
     haze: Vec<f64>,
     /// Labels stay left of this column (the info panel covers the rest).
     pub label_limit: usize,
+    /// Cells covered by an HD image, which labels must avoid.
+    reserved: Vec<bool>,
 }
 
 impl Canvas {
@@ -51,6 +53,7 @@ impl Canvas {
             label: vec![None; n],
             haze: vec![0.0; n],
             label_limit: w,
+            reserved: vec![false; n],
         }
     }
 
@@ -67,6 +70,24 @@ impl Canvas {
         self.glyph.fill(None);
         self.label.fill(None);
         self.haze.fill(0.0);
+        self.reserved.fill(false);
+    }
+
+    /// Mark the cells under an ellipse (centre and radii in cells) as taken.
+    fn reserve(&mut self, cx: f64, cy: f64, rx: f64, ry: f64) {
+        for y in (cy - ry).floor() as i64..=(cy + ry).ceil() as i64 {
+            for x in (cx - rx).floor() as i64..=(cx + rx).ceil() as i64 {
+                let (dx, dy) = ((x as f64 + 0.5 - cx) / rx, (y as f64 + 0.5 - cy) / ry);
+                if dx * dx + dy * dy <= 1.2
+                    && x >= 0
+                    && y >= 0
+                    && (x as usize) < self.w
+                    && (y as usize) < self.h
+                {
+                    self.reserved[y as usize * self.w + x as usize] = true;
+                }
+            }
+        }
     }
 
     /// Set a block pixel (x in 0..2w, y in 0..2h) if it is nearer than what is there.
@@ -125,7 +146,9 @@ impl Canvas {
         }
         let row = y as usize * self.w;
         let blocked = |cx: i64| {
-            self.label[row + cx as usize].is_some() || self.quad(cx as usize, y as usize).0 != 0
+            self.label[row + cx as usize].is_some()
+                || self.reserved[row + cx as usize]
+                || self.quad(cx as usize, y as usize).0 != 0
         };
         if (x..x + n).any(blocked) {
             return false;
@@ -520,6 +543,20 @@ pub struct Frame<'a> {
     pub focused: Option<usize>,
     /// Horizontal centre of the view in cells (shifted left when the info panel is open).
     pub center_x: f64,
+    /// Cell size in pixels when bodies are drawn as images (HD mode).
+    pub hd: Option<(u32, u32)>,
+    /// What each image slot last showed, so slow-changing images need not be redrawn every frame.
+    pub sent: Option<&'a std::collections::HashMap<u32, Sent>>,
+}
+
+/// Cell box of an image slot and when it was last redrawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sent {
+    pub col: i64,
+    pub row: i64,
+    pub cols: u32,
+    pub rows: u32,
+    pub t: f64,
 }
 
 pub struct Scene {
@@ -605,13 +642,13 @@ impl Scene {
         }
     }
 
-    pub fn render(&self, cv: &mut Canvas, fr: &Frame) -> Vec<Hit> {
+    pub fn render(&self, cv: &mut Canvas, fr: &Frame) -> (Vec<Hit>, Vec<Sprite>) {
         cv.clear();
         let h = cv.h as f64;
         let view = View::new(&fr.cam, 2.0 * h, fr.center_x);
         self.sky(cv, &view, fr.t);
 
-        let sun_proj = view.project(V3::ZERO);
+        let sun_proj = view.project(V3::ZERO).filter(|_| fr.hd.is_none());
         if let Some((sx, sy, sd)) = sun_proj {
             sun_glow(
                 cv,
@@ -655,10 +692,24 @@ impl Scene {
         if let (Some(f), Some(fd)) = (fr.focused, focus_depth) {
             order.retain(|o| o.0 == f || o.0 == 0 || o.2 > fd * 1.05);
         }
+        let mut sprites = Vec::new();
         for &(i, pos, _) in &order {
-            if let Some(hit) = draw_body(cv, &view, fr, i, pos) {
-                hits.push(hit);
+            let Some(g) = body_geom(&view, fr, i, pos) else {
+                continue;
+            };
+            match fr.hd {
+                Some(cell) => {
+                    cv.reserve(g.cx, g.cy * 0.5, g.sr, g.sr * 0.5);
+                    sprites.extend(body_sprite(&g, i as u32, cell, fr.sent));
+                }
+                None => draw_body(cv, &g),
             }
+            hits.push(Hit {
+                body: i,
+                x: g.cx,
+                y: g.cy * 0.5,
+                r: g.sr * if g.has_ring { 1.6 } else { 1.0 },
+            });
         }
         for hit in &hits {
             let body = &fr.bodies[hit.body];
@@ -693,7 +744,7 @@ impl Scene {
                 cv.text((hit.x - hit.r).round() as i64 - n - 1, ly, &text, col);
             }
         }
-        hits
+        (hits, sprites)
     }
 
     fn sky(&self, cv: &mut Canvas, view: &View, t: f64) {
@@ -807,9 +858,38 @@ fn sun_glow(cv: &mut Canvas, sx: f64, sy: f64, sr: f64, t: f64) {
     }
 }
 
-fn draw_body(cv: &mut Canvas, view: &View, fr: &Frame, i: usize, pos: V3) -> Option<Hit> {
+/// Everything needed to shade one body for the current view. Both back ends use it, so the
+/// text renderer and the HD (pixel) renderer show exactly the same planet.
+pub struct BodyGeom<'a> {
+    pub i: usize,
+    id: &'a str,
+    body: &'a Body,
+    /// Centre in view units (x in cells, y in half rows) and on-screen radius in the same units.
+    pub cx: f64,
+    pub cy: f64,
+    pub sr: f64,
+    depth: f64,
+    radius: f64,
+    ambient: f64,
+    /// 0 keeps only the broad colours (small text-mode discs), 1 keeps all surface detail.
+    detail: f64,
+    has_ring: bool,
+    axis: V3,
+    axes: (V3, V3, V3),
+    spin: f64,
+    sun_dir: V3,
+    ax_c: V3,
+    l_dot_a: f64,
+    lit_face: bool,
+    right: V3,
+    up: V3,
+    fwd: V3,
+    t: f64,
+}
+
+fn body_geom<'a>(view: &View, fr: &Frame<'a>, i: usize, pos: V3) -> Option<BodyGeom<'a>> {
     let body = &fr.bodies[i];
-    let (pcx, pcy, depth) = view.project(pos)?;
+    let (cx, cy, depth) = view.project(pos)?;
     let shrink = if fr.focused.is_some_and(|f| f != i) && i != 0 {
         0.3
     } else {
@@ -825,34 +905,179 @@ fn draw_body(cv: &mut Canvas, view: &View, fr: &Frame, i: usize, pos: V3) -> Opt
     // would look like a hole on terminals with a coloured background.
     let ambient = 0.10 + 0.5 * (1.0 - smoothstep(3.5, 10.0, sr));
     let id = body.id.as_str();
-    // rings only once they are big enough to read; tiny ones are just dark specks
-    let has_ring = has_rings(id) && sr >= if id == "uranus" { 10.0 } else { 2.5 };
-    let reach = if has_ring { sr * 2.3 } else { sr } + 1.0;
+    // in text mode, rings only once they are big enough to read; tiny ones are dark specks
+    let min_ring = match (id, fr.hd.is_some()) {
+        ("uranus", false) => 10.0,
+        ("uranus", true) => 5.0,
+        (_, false) => 2.5,
+        (_, true) => 1.2,
+    };
+    let has_ring = has_rings(id) && sr >= min_ring;
     let axis = body.pole();
-    let (bx, by, bz) = body_axes(axis);
-    let sun_dir = (-pos).norm();
+    let sun_dir = if i == 0 { V3::Z } else { (-pos).norm() };
     // the spin phase; Earth uses real sidereal time so its geography is correct
     let spin = if id == "earth" {
         gmst(fr.spin_jd)
     } else {
         TAU * (fr.spin_jd * 24.0 / body.rotation_hours).rem_euclid(1.0)
     };
-    let to_body = |n: V3| V3::new(n.dot(bx), n.dot(by), n.dot(bz)).rot_z(-spin);
     let ax_c = V3::new(axis.dot(view.right), axis.dot(view.up), -axis.dot(view.fwd));
     let l_dot_a = sun_dir.dot(axis);
-    let lit_face = (l_dot_a > 0.0) == (ax_c.z > 0.0);
+    let detail = if fr.hd.is_some() {
+        1.0
+    } else {
+        smoothstep(4.0, 12.0, sr)
+    };
+    Some(BodyGeom {
+        i,
+        id,
+        body,
+        cx,
+        cy,
+        sr,
+        depth,
+        radius,
+        ambient,
+        detail,
+        has_ring,
+        axis,
+        axes: body_axes(axis),
+        spin,
+        sun_dir,
+        ax_c,
+        l_dot_a,
+        lit_face: (l_dot_a > 0.0) == (ax_c.z > 0.0),
+        right: view.right,
+        up: view.up,
+        fwd: view.fwd,
+        t: fr.t,
+    })
+}
 
+impl BodyGeom<'_> {
+    /// How far from the centre anything is drawn, in planet radii.
+    fn reach(&self) -> f64 {
+        if self.i == 0 {
+            1.0 + (2.0f64).min(26.0 / self.sr)
+        } else if self.has_ring {
+            2.3
+        } else {
+            1.08
+        }
+    }
+
+    fn to_body(&self, n: V3) -> V3 {
+        let (x, y, z) = self.axes;
+        V3::new(n.dot(x), n.dot(y), n.dot(z)).rot_z(-self.spin)
+    }
+
+    fn atmosphere(&self) -> Option<Rgb> {
+        match self.id {
+            "earth" => Some(Rgb::hex(0x7ab0ff)),
+            "venus" => Some(Rgb::hex(0xffe8b0)),
+            "uranus" | "neptune" => Some(Rgb::hex(0xa0e0ff)),
+            _ => None,
+        }
+    }
+
+    /// Surface colour at disc coordinates (u, v) with u² + v² <= 1; also returns the depth
+    /// of the surface towards the viewer (1 at the centre, 0 at the rim).
+    fn planet(&self, u: f64, v: f64) -> (Rgb, f64) {
+        let wp = (1.0 - u * u - v * v).max(0.0).sqrt();
+        let n = self.right * u + self.up * v - self.fwd * wp;
+        if self.i == 0 {
+            let nb = self.to_body(n);
+            let gran = fbm(
+                V3::new(nb.x * 9.0, nb.y * 9.0, nb.z * 9.0 + self.t * 0.12),
+                3,
+            );
+            let c = Rgb::hex(0xff9a3c)
+                .mix(Rgb::hex(0xfff3d0), wp.powf(0.45))
+                .scale(0.86 + 0.22 * gran);
+            return (c, wp);
+        }
+        let tex = surface(self.id, self.to_body(n), self.t)
+            .mix(self.body.rgb(), 0.75 * (1.0 - self.detail));
+        let ndl = n.dot(self.sun_dir);
+        let mut lit = (ndl * 1.15 + 0.05).clamp(0.0, 1.0).powf(0.85);
+        if self.has_ring && self.l_dot_a.abs() > 1e-3 {
+            let s = -n.dot(self.axis) / self.l_dot_a;
+            if s > 0.0 {
+                if let Some((tau, _, _)) = ring_at(self.id, (n + self.sun_dir * s).len()) {
+                    lit *= 0.25 + 0.75 * (-tau / self.l_dot_a.abs()).exp();
+                }
+            }
+        }
+        let mut c = tex.scale(self.ambient + (1.0 - self.ambient) * lit);
+        if let Some(a) = self.atmosphere() {
+            c = c.add(a.scale((1.0 - wp).powf(2.5) * (ndl + 0.3).clamp(0.0, 1.0) * 0.5));
+        }
+        (c, wp)
+    }
+
+    /// Ring colour and opacity at (u, v), and whether that bit of ring is in front of the
+    /// planet's surface depth `wp` (pass None where the planet is not drawn).
+    fn ring(&self, u: f64, v: f64, wp: Option<f64>) -> Option<(Rgb, f64, bool)> {
+        if !self.has_ring || self.ax_c.z.abs() <= 0.01 {
+            return None;
+        }
+        let wr = -(self.ax_c.x * u + self.ax_c.y * v) / self.ax_c.z;
+        let r = (u * u + v * v + wr * wr).sqrt();
+        let (tau, alb, rc) = ring_at(self.id, r)?;
+        let alpha = 1.0 - (-tau / self.ax_c.z.abs().max(0.03)).exp();
+        let p = self.right * u + self.up * v - self.fwd * wr;
+        let qs = p.dot(self.sun_dir);
+        let shadow = if qs < 0.0 && p.dot(p) - qs * qs < 1.0 {
+            0.08
+        } else {
+            1.0
+        };
+        let light = if self.lit_face {
+            0.42 + 0.58 * self.l_dot_a.abs().sqrt()
+        } else {
+            0.12 + 1.4 * tau * (-2.5 * tau).exp()
+        };
+        // at icon size the ring is lit generously so it reads as Saturn's ring,
+        // not as two dark specks beside the planet
+        let light = light.max(0.95 * (1.0 - smoothstep(5.0, 9.0, self.sr)));
+        Some((
+            rc.scale(alb * light * shadow),
+            alpha,
+            wp.is_none_or(|w| wr > w),
+        ))
+    }
+
+    /// Sun corona opacity at distance `d` (in solar radii) outside the disc.
+    fn corona(&self, u: f64, v: f64, d: f64) -> (Rgb, f64) {
+        let reach = self.reach();
+        let ang = v.atan2(u);
+        let rays = 0.65
+            + 0.35
+                * vnoise(
+                    ang.cos() * 4.0 + 7.0,
+                    ang.sin() * 4.0,
+                    self.t * 0.45 - d * self.sr * 0.04,
+                );
+        let g = ((reach - d) / (reach - 1.0)).clamp(0.0, 1.0).powf(2.4) * rays;
+        (Rgb::hex(0xff7a2a).mix(Rgb::hex(0xffe2a0), g), g * 0.85)
+    }
+}
+
+/// Text back end: write the body into the canvas' block pixels.
+fn draw_body(cv: &mut Canvas, g: &BodyGeom) {
+    let reach = g.sr * if g.has_ring { 2.3 } else { 1.0 } + 1.0;
     // pixels are half a cell wide: x counts in half cells, y in half rows
     let (x0, x1) = (
-        (2.0 * (pcx - reach)).floor() as i64,
-        (2.0 * (pcx + reach)).ceil() as i64,
+        (2.0 * (g.cx - reach)).floor() as i64,
+        (2.0 * (g.cx + reach)).ceil() as i64,
     );
-    let (y0, y1) = ((pcy - reach).floor() as i64, (pcy + reach).ceil() as i64);
+    let (y0, y1) = ((g.cy - reach).floor() as i64, (g.cy + reach).ceil() as i64);
+    let sr = g.sr;
     let (inner, outer) = ((1.0 - 1.2 / sr).max(0.0).powi(2), (1.0 + 1.2 / sr).powi(2));
     for py in y0..=y1 {
         for px in x0..=x1 {
-            let mut u = ((px as f64 + 0.5) * 0.5 - pcx) / sr;
-            let mut v = -(py as f64 + 0.5 - pcy) / sr;
+            let mut u = ((px as f64 + 0.5) * 0.5 - g.cx) / sr;
+            let mut v = -(py as f64 + 0.5 - g.cy) / sr;
             let c2 = u * u + v * v;
             // 4x4 coverage test near the rim so small discs come out round
             let on_planet = if c2 < inner {
@@ -863,108 +1088,241 @@ fn draw_body(cv: &mut Canvas, view: &View, fr: &Frame, i: usize, pos: V3) -> Opt
                 let mut inside = 0;
                 for sy in 0..4 {
                     for sx in 0..4 {
-                        let su = ((px as f64 + (sx as f64 + 0.5) / 4.0) * 0.5 - pcx) / sr;
-                        let sv = -(py as f64 + (sy as f64 + 0.5) / 4.0 - pcy) / sr;
+                        let su = ((px as f64 + (sx as f64 + 0.5) / 4.0) * 0.5 - g.cx) / sr;
+                        let sv = -(py as f64 + (sy as f64 + 0.5) / 4.0 - g.cy) / sr;
                         inside += (su * su + sv * sv <= 1.0) as u32;
                     }
                 }
                 inside >= 8
             };
-            let mut d2 = u * u + v * v;
-            if on_planet && d2 > 0.97 {
+            if on_planet && u * u + v * v > 0.97 {
                 // an edge pixel whose centre falls just outside: shade it at the rim
-                let k = (0.97 / d2).sqrt();
+                let k = (0.97 / (u * u + v * v)).sqrt();
                 u *= k;
                 v *= k;
-                d2 = 0.97;
             }
-            let wp = if on_planet { (1.0 - d2).sqrt() } else { -1e9 };
-            let mut col: Option<Rgb> = None;
-            if on_planet {
-                let n = view.right * u + view.up * v - view.fwd * wp;
-                col = Some(if i == 0 {
-                    let nb = to_body(n);
-                    let gran = fbm(V3::new(nb.x * 9.0, nb.y * 9.0, nb.z * 9.0 + fr.t * 0.12), 3);
-                    Rgb::hex(0xff9a3c)
-                        .mix(Rgb::hex(0xfff3d0), wp.powf(0.45))
-                        .scale(0.86 + 0.22 * gran)
-                } else {
-                    // small discs keep only their broad colours; fine texture there reads as noise
-                    let tex = surface(id, to_body(n), fr.t)
-                        .mix(body.rgb(), 0.75 * (1.0 - smoothstep(4.0, 12.0, sr)));
-                    let ndl = n.dot(sun_dir);
-                    let mut lit = (ndl * 1.15 + 0.05).clamp(0.0, 1.0).powf(0.85);
-                    if has_ring && l_dot_a.abs() > 1e-3 {
-                        let s = -n.dot(axis) / l_dot_a;
-                        if s > 0.0 {
-                            if let Some((tau, _, _)) = ring_at(id, (n + sun_dir * s).len()) {
-                                lit *= 0.25 + 0.75 * (-tau / l_dot_a.abs()).exp();
-                            }
+            let planet = on_planet.then(|| g.planet(u, v));
+            let mut col = planet.map(|p| p.0);
+            if let Some((rc, alpha, front)) = g.ring(u, v, planet.map(|p| p.1)) {
+                if front {
+                    col = match col {
+                        Some(c) => Some(c.mix(rc, alpha)),
+                        // over empty space, skip faint or very dark ring pixels: they read
+                        // as dirt on terminals that are not pure black
+                        None if alpha > 0.12 && rc.scale(alpha.sqrt()).luma() > 0.07 => {
+                            Some(rc.scale(alpha.sqrt()))
                         }
-                    }
-                    let atmo = match id {
-                        "earth" => Some(Rgb::hex(0x7ab0ff)),
-                        "venus" => Some(Rgb::hex(0xffe8b0)),
-                        "uranus" | "neptune" => Some(Rgb::hex(0xa0e0ff)),
-                        _ => None,
+                        None => None,
                     };
-                    let mut c = tex.scale(ambient + (1.0 - ambient) * lit);
-                    if let Some(a) = atmo {
-                        c = c
-                            .add(a.scale((1.0 - wp).powf(2.5) * (ndl + 0.3).clamp(0.0, 1.0) * 0.5));
-                    }
-                    c
-                });
-            }
-            if has_ring && ax_c.z.abs() > 0.01 {
-                let wr = -(ax_c.x * u + ax_c.y * v) / ax_c.z;
-                if !on_planet || wr > wp {
-                    let r = (d2 + wr * wr).sqrt();
-                    if let Some((tau, alb, rc)) = ring_at(id, r) {
-                        let alpha = 1.0 - (-tau / ax_c.z.abs().max(0.03)).exp();
-                        let p = view.right * u + view.up * v - view.fwd * wr;
-                        let qs = p.dot(sun_dir);
-                        let shadow = if qs < 0.0 && p.dot(p) - qs * qs < 1.0 {
-                            0.08
-                        } else {
-                            1.0
-                        };
-                        let light = if lit_face {
-                            0.42 + 0.58 * l_dot_a.abs().sqrt()
-                        } else {
-                            0.12 + 1.4 * tau * (-2.5 * tau).exp()
-                        };
-                        // at icon size the ring is lit generously so it reads as Saturn's ring,
-                        // not as two dark specks beside the planet
-                        let light = light.max(0.95 * (1.0 - smoothstep(5.0, 9.0, sr)));
-                        let ring_col = rc.scale(alb * light * shadow);
-                        col = match col {
-                            Some(c) => Some(c.mix(ring_col, alpha)),
-                            // over empty space, skip faint or very dark ring pixels: they read
-                            // as dirt on terminals that are not pure black
-                            None if alpha > 0.12 && ring_col.scale(alpha.sqrt()).luma() > 0.07 => {
-                                Some(ring_col.scale(alpha.sqrt()))
-                            }
-                            None => None,
-                        };
-                    }
                 }
             }
             if let Some(c) = col {
-                cv.pixel(px, py, c, depth - wp.max(0.0) * radius);
+                let wp = planet.map_or(0.0, |p| p.1);
+                cv.pixel(px, py, c, g.depth - wp * g.radius);
             }
         }
     }
-    Some(Hit {
-        body: i,
-        x: pcx,
-        y: pcy * 0.5,
-        r: sr * if has_ring { 1.6 } else { 1.0 },
+}
+
+/// An RGBA image aligned to the cell grid, drawn on top of the text by the graphics back end.
+pub struct Sprite {
+    /// Identifies what it shows across frames (body index, or a panel slot).
+    pub slot: u32,
+    /// Top-left cell relative to the canvas, and size in cells.
+    pub col: i64,
+    pub row: i64,
+    pub cols: u32,
+    pub rows: u32,
+    /// Image size in pixels (may be lower than the cell box; the terminal scales it up).
+    pub w: u32,
+    pub h: u32,
+    pub rgba: Vec<u8>,
+    /// Unchanged since last frame: leave the image on screen as it is.
+    pub keep: bool,
+}
+
+/// Images larger than this are rendered at half resolution and scaled up by the terminal,
+/// which keeps very close fly-bys fast; at that size the difference is hard to see.
+const MAX_SPRITE_PIXELS: u64 = 240_000;
+
+/// HD back end: render the body at true pixel resolution with anti-aliased edges, a soft
+/// corona for the Sun and a thin atmosphere halo for planets that have one.
+fn body_sprite(
+    g: &BodyGeom,
+    slot: u32,
+    cell: (u32, u32),
+    sent: Option<&std::collections::HashMap<u32, Sent>>,
+) -> Option<Sprite> {
+    let (cw, ch) = (cell.0 as f64, cell.1 as f64);
+    // centre in screen pixels; the radius uses the horizontal metric so the disc stays round
+    let (x, y) = (g.cx * cw, g.cy * ch * 0.5);
+    let r_px = g.sr * cw;
+    let ext = r_px * g.reach() + 1.0;
+    let col = ((x - ext) / cw).floor() as i64;
+    let row = ((y - ext) / ch).floor() as i64;
+    let cols = (((x + ext) / cw).ceil() as i64 - col).max(1) as u32;
+    let rows = (((y + ext) / ch).ceil() as i64 - row).max(1) as u32;
+    let full = cols as u64 * cell.0 as u64 * rows as u64 * cell.1 as u64;
+    // Big images change slowly (a planet's spin, the corona's flicker), so they are redrawn
+    // less often than small ones; an image that has not moved is simply left on screen.
+    let interval = if slot == CARD_SLOT {
+        0.1
+    } else if full > 150_000 {
+        1.0 / 12.0
+    } else if full > 30_000 {
+        1.0 / 20.0
+    } else {
+        0.0
+    };
+    if let Some(prev) = sent.and_then(|m| m.get(&slot)) {
+        if (prev.col, prev.row, prev.cols, prev.rows) == (col, row, cols, rows)
+            && g.t - prev.t < interval
+        {
+            return Some(Sprite {
+                slot,
+                col,
+                row,
+                cols,
+                rows,
+                w: 0,
+                h: 0,
+                rgba: Vec::new(),
+                keep: true,
+            });
+        }
+    }
+    let (pw, ph) = if full > MAX_SPRITE_PIXELS {
+        ((cell.0 / 2).max(1), (cell.1 / 2).max(1))
+    } else {
+        (cell.0, cell.1)
+    };
+    let (w, h) = (cols * pw, rows * ph);
+    // screen pixels per image pixel
+    let (sx, sy) = (cw / pw as f64, ch / ph as f64);
+    let (ox, oy) = (col as f64 * cw, row as f64 * ch);
+    let atmo = g.atmosphere();
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    par_rows(&mut rgba, w as usize, |iy, line| {
+        for ix in 0..w as usize {
+            let px = ox + (ix as f64 + 0.5) * sx;
+            let py = oy + (iy as f64 + 0.5) * sy;
+            let (u, v) = ((px - x) / r_px, -(py - y) / r_px);
+            let d = (u * u + v * v).sqrt();
+            // planet coverage, supersampled near the rim for a clean edge
+            let edge = 1.5 * sx.max(sy) / r_px;
+            let cov = if d < 1.0 - edge {
+                1.0
+            } else if d > 1.0 + edge {
+                0.0
+            } else {
+                let mut n = 0;
+                for k in 0..16 {
+                    let (a, b) = ((k % 4) as f64 + 0.5, (k / 4) as f64 + 0.5);
+                    let su = (ox + (ix as f64 + a / 4.0) * sx - x) / r_px;
+                    let sv = -(oy + (iy as f64 + b / 4.0) * sy - y) / r_px;
+                    n += (su * su + sv * sv <= 1.0) as u32;
+                }
+                n as f64 / 16.0
+            };
+            let mut out = (Rgb::BLACK, 0.0);
+            // behind the planet: corona, halo, or the far side of the rings
+            if d >= 1.0 - edge {
+                if g.i == 0 {
+                    out = g.corona(u, v, d.max(1.0));
+                } else if let Some(a) = atmo {
+                    let k = ((d - 1.0) / 0.08).clamp(0.0, 1.0);
+                    let rim = V3::new(u, v, 0.0) * (1.0 / d.max(1e-9));
+                    let lit =
+                        ((g.right * rim.x + g.up * rim.y).dot(g.sun_dir) + 0.35).clamp(0.0, 1.0);
+                    out = (a, (1.0 - k).powi(2) * 0.55 * lit.max(0.15));
+                }
+            }
+            let (uc, vc) = if d > 0.995 {
+                (u * 0.995 / d, v * 0.995 / d)
+            } else {
+                (u, v)
+            };
+            let planet = (cov > 0.0).then(|| g.planet(uc, vc));
+            let ring = g.ring(u, v, planet.map(|p| p.1));
+            if let Some((rc, ra, false)) = ring {
+                out = over((rc, ra), out);
+            }
+            if let Some((pc, _)) = planet {
+                out = over((pc, cov), out);
+            }
+            if let Some((rc, ra, true)) = ring {
+                out = over((rc, ra), out);
+            }
+            let (r, gg, b) = out.0.to_u8();
+            let k = ix * 4;
+            line[k..k + 4].copy_from_slice(&[
+                r,
+                gg,
+                b,
+                (out.1.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+            ]);
+        }
+    });
+    Some(Sprite {
+        slot,
+        col,
+        row,
+        cols,
+        rows,
+        w,
+        h,
+        rgba,
+        keep: false,
     })
 }
 
+/// Porter-Duff "over" for straight (non-premultiplied) colour and alpha.
+fn over(top: (Rgb, f64), below: (Rgb, f64)) -> (Rgb, f64) {
+    let a = top.1 + below.1 * (1.0 - top.1);
+    if a <= 1e-6 {
+        return (Rgb::BLACK, 0.0);
+    }
+    let c = top
+        .0
+        .scale(top.1)
+        .add(below.0.scale(below.1 * (1.0 - top.1)))
+        .scale(1.0 / a);
+    (c, a)
+}
+
+/// Fill an RGBA buffer row by row on all CPU cores.
+fn par_rows(buf: &mut [u8], w: usize, f: impl Fn(usize, &mut [u8]) + Sync) {
+    let stride = w * 4;
+    if stride == 0 {
+        return;
+    }
+    let rows = buf.len() / stride;
+    // threads only pay off for big images; small ones are cheaper on this thread
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(buf.len() / (4 * 40_000))
+        .clamp(1, 8);
+    if threads == 1 {
+        for (j, line) in buf.chunks_mut(stride).enumerate() {
+            f(j, line);
+        }
+        return;
+    }
+    let per = rows.div_ceil(threads).max(1);
+    std::thread::scope(|s| {
+        for (k, chunk) in buf.chunks_mut(per * stride).enumerate() {
+            let f = &f;
+            s.spawn(move || {
+                for (j, line) in chunk.chunks_mut(stride).enumerate() {
+                    f(k * per + j, line);
+                }
+            });
+        }
+    });
+}
+
 /// A close-up of one body, lit from its true Sun direction, for the info panel.
-pub fn render_card(cv: &mut Canvas, scene: &Scene, fr: &Frame, i: usize) {
+pub fn render_card(cv: &mut Canvas, scene: &Scene, fr: &Frame, i: usize) -> Option<Sprite> {
     cv.clear();
     let pos = body_position(i, fr.jd);
     let radius = body_radius(i, fr.bodies);
@@ -993,13 +1351,27 @@ pub fn render_card(cv: &mut Canvas, scene: &Scene, fr: &Frame, i: usize) {
         el: v.z.asin(),
     };
     let view = View::new(&cam, h_px, cv.w as f64 * 0.5);
-    let card = Frame { cam, ..*fr };
+    let card = Frame {
+        cam,
+        focused: None,
+        ..*fr
+    };
     scene.sky(cv, &view, fr.t);
-    if i == 0 {
-        sun_glow(cv, view.cx, view.cy, want, fr.t);
+    let g = body_geom(&view, &card, i, pos)?;
+    match fr.hd {
+        Some(cell) => body_sprite(&g, CARD_SLOT, cell, fr.sent),
+        None => {
+            if i == 0 {
+                sun_glow(cv, view.cx, view.cy, want, fr.t);
+            }
+            draw_body(cv, &g);
+            None
+        }
     }
-    draw_body(cv, &view, &card, i, pos);
 }
+
+/// Sprite slot used by the close-up in the info panel.
+pub const CARD_SLOT: u32 = 64;
 
 /// Top-down map of the orbits with the bodies, highlighting `i`; shown while flying to a body.
 pub fn render_minimap(cv: &mut Canvas, fr: &Frame, i: usize) {

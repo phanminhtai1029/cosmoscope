@@ -20,16 +20,24 @@ def main():
     ap.add_argument("--step", type=float, default=0.3, help="seconds of animation between frames")
     ap.add_argument("--fps", type=int, default=10)
     ap.add_argument("--scale", type=float, default=1.0)
+    ap.add_argument("--hd", action="store_true", help="render with kitty graphics (HD planets)")
+    ap.add_argument("--cell", default="8x16", help="cell size in pixels for --hd")
     ap.add_argument("out", nargs="?", default="assets/preview.gif")
     a = ap.parse_args()
     frames, t = [], a.start
     with tempfile.TemporaryDirectory() as tmp:
         ans, png = os.path.join(tmp, "f.ans"), os.path.join(tmp, "f.png")
         while t <= a.end:
+            graphics = ["--graphics", "kitty", "--cell", a.cell] if a.hd else ["--graphics", "off"]
             with open(ans, "w") as f:
                 subprocess.run([a.binary, "--tour", "--date", a.date, "--colors", "truecolor",
-                                "--snapshot", a.size, "--at", f"{t:.3f}"], stdout=f, check=True)
-            ansi2png.main(ans, png)
+                                "--snapshot", a.size, "--at", f"{t:.3f}"] + graphics, stdout=f, check=True)
+            if a.hd:
+                sim = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kitty_sim.py")
+                subprocess.run([sys.executable, "-I", sim, ans, png, "--cell", a.cell],
+                               check=True, stderr=subprocess.DEVNULL)
+            else:
+                ansi2png.main(ans, png)
             im = Image.open(png).convert("RGB")
             if a.scale != 1.0:
                 im = im.resize((int(im.width * a.scale), int(im.height * a.scale)), Image.LANCZOS)

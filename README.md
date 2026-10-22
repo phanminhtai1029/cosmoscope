@@ -9,12 +9,13 @@
 
 ![cosmoscope guided tour](assets/screenshots/preview.gif)
 
-<sub>The guided tour (`cosmoscope --tour`), recorded at about 3x speed.</sub>
+<sub>The guided tour (`cosmoscope --tour`) in HD mode, recorded at about 3x speed.</sub>
 
 ---
 
 ## Features
 
+- **HD planets.** In terminals that speak the kitty graphics protocol (Ghostty, kitty and WezTerm on Linux and macOS; Konsole with `--graphics kitty`), the Sun, planets and rings are drawn as real anti-aliased images with true transparency. The text layer still carries the orbits, stars, labels and panels, so it stays a terminal app. Every other terminal gets a carefully tuned text renderer instead.
 - **The real sky, right now.** Planet positions come from NASA JPL orbital elements for the current date, and they match JPL Horizons to within 0.15 degrees. Each planet's spin axis comes from the IAU, so Saturn's rings tilt the way they really do.
 - **Time travel.** Run time from real time up to 10 years per second, forwards or backwards, or jump to any date from the year 1000 to 3000: `--date 1969-07-20`.
 - **Fly to any world.** Press <kbd>Enter</kbd> and the camera glides in close, lit by the Sun from its true direction.
@@ -29,16 +30,24 @@
 
 <table>
   <tr>
-    <td><img src="assets/screenshots/system.png" alt="The whole Solar System"></td>
-    <td><img src="assets/screenshots/earth.png" alt="Flying to Earth"></td>
+    <td><img src="assets/screenshots/system.png" alt="The whole Solar System in HD"></td>
+    <td><img src="assets/screenshots/earth.png" alt="Flying to Earth in HD"></td>
   </tr>
   <tr>
     <td><img src="assets/screenshots/saturn.png" alt="Saturn and its rings in 2032"></td>
-    <td valign="middle">
-      <b>Left to right:</b> the whole system with the info panel; Earth at 08:00 UTC on 22 Oct 2026, with Africa in daylight; Saturn in 2032 with its rings opening up again after the 2025 equinox.
-    </td>
+    <td><img src="assets/screenshots/jupiter.png" alt="Jupiter and the Great Red Spot"></td>
   </tr>
 </table>
+
+<sub>HD mode. Top: the whole system with the live panel; Earth at 08:00 UTC on 22 Oct 2026, with Africa in daylight. Bottom: Saturn in 2032, with the planet's shadow across its rings; Jupiter and the Great Red Spot.</sub>
+
+<details>
+<summary>Text mode (GNOME Terminal, Terminal.app, tmux, SSH ...)</summary>
+
+![Text mode](assets/screenshots/system-text.png)
+
+The text renderer packs 2×2 colour blocks into each cell with half-block and quadrant glyphs, and orbits use braille dots. It needs no special terminal support.
+</details>
 
 ## Installation
 
@@ -103,6 +112,7 @@ cosmoscope --no-panel --no-rotate
 | `--tour` | Guided tour; any key takes the controls back |
 | `--no-panel` | Hide the info panel; <kbd>i</kbd> toggles it |
 | `--no-rotate` | Keep the camera still; <kbd>r</kbd> toggles it |
+| `--graphics <MODE>` | `auto` (default: HD when the terminal supports it), `kitty` (force HD) or `off` (text only); also `COSMOSCOPE_GRAPHICS` |
 | `--colors <MODE>` | `auto` (default), `truecolor` or `256`; the `COSMOSCOPE_COLORS` variable does the same |
 | `--fps <N>` | Frame rate, 5-120 (default 30). Lower it over slow SSH links |
 
@@ -128,10 +138,14 @@ cosmoscope --no-panel --no-rotate
 
 ## Terminal tips
 
+- **For the best picture, use a terminal with the kitty graphics protocol.** Good choices are [Ghostty](https://ghostty.org), [kitty](https://sw.kovidgoyal.net/kitty/) or [WezTerm](https://wezfurlong.org/wezterm/), on Linux or macOS. HD switches on automatically, and the status bar shows **HD**. Inside tmux or screen, images do not pass through, so cosmoscope falls back to text.
+  - Ubuntu: `sudo snap install ghostty --classic`
+  - macOS: `brew install --cask ghostty`
+- **HD needs a little more power.** It uses about one CPU core and a few MB/s of terminal bandwidth. Over SSH, use `--graphics off` or a lower `--fps`.
 - **Fonts.** Bodies are drawn with half blocks (`▀▄`) and orbits with braille dots (`⣿`). Any modern monospace font has them: JetBrains Mono, Cascadia Code, Fira Code, DejaVu Sans Mono, SF Mono, Menlo or Nerd Fonts.
 - **Colour.** Most terminals get 24-bit colour automatically, including GNOME Terminal, Konsole, kitty, Alacritty, WezTerm, Ghostty, iTerm2 and Windows Terminal. macOS Terminal.app gets the 256-colour fallback. Inside tmux, either enable RGB (`set -as terminal-features ",*:RGB"`) or run with `--colors truecolor`.
 - **Size.** It works from 80×24 upwards, and it looks best at 120×40 or larger with a small font.
-- **SSH.** Every frame is fully animated, so on slow links lower the frame rate with `--fps 15`.
+- **SSH.** Every frame is fully animated, so on slow links lower the frame rate with `--fps 15`, and use `--graphics off` if you are in a kitty-protocol terminal.
 
 ## How accurate is it?
 
@@ -146,6 +160,7 @@ cosmoscope --no-panel --no-rotate
 
 ## Roadmap
 
+- **HD everywhere**: Sixel and iTerm2 inline images, plus Windows support, so Windows Terminal, foot and iTerm2 get HD too.
 - **v0.2**: moons (the Moon, the Galilean moons, Titan), Mars' polar seasons, Uranus and Neptune ring detail, comets.
 - **v0.3**: a size comparison view, "your weight on ..." and "travel time to ..." calculators, `cosmoscope --fact` for your shell greeting.
 - **Later**: zoom out past the Kuiper belt to the nearest stars, the Milky Way, the Local Group and the cosmic web.
@@ -158,7 +173,9 @@ Ideas and pull requests are welcome. Planet facts and data live in [`assets/bodi
 src/
   main.rs        command line, terminal setup, event loop, --snapshot
   app.rs         state: time, selection, camera, tour, input
-  render.rs      software renderer: half-block bodies, braille orbits, sky, rings, shadows
+  render.rs      software renderer: shared body shading, text back end (block/quadrant glyphs,
+                 braille orbits, sky) and HD back end (anti-aliased RGBA sprites)
+  kitty.rs       kitty graphics protocol output: chunked zlib images, double-buffered ids
   ui.rs          ratatui layout: info panel, status bar, help
   ephemeris.rs   JPL orbital elements and Kepler's equation (with Horizons tests)
   time.rs        Julian dates and calendar conversion
@@ -166,7 +183,7 @@ src/
 assets/
   bodies.toml    physical data, pole directions and facts for each body
   earth_128x64.rgb   NASA Blue Marble, downsampled
-tools/           screenshot and GIF generators (Python + Pillow)
+tools/           screenshot/GIF generators and a kitty-protocol compositor (Python + Pillow)
 ```
 
 ## Credits
