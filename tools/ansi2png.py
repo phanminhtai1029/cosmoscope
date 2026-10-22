@@ -28,6 +28,14 @@ def font():
     return ImageFont.load_default()
 
 
+def fallback_font():
+    """DejaVu Sans Mono covers the arrows, bullets and symbols other mono fonts often lack."""
+    try:
+        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", FONT_SIZE)
+    except OSError:
+        return font()
+
+
 def xterm256(n):
     if n >= 232:
         v = 8 + (n - 232) * 10
@@ -67,7 +75,7 @@ def main(src, dst, bg=BG):
     cols = max(len(TOKEN.sub(lambda m: m.group(2) or "", l)) for l in lines)
     img = Image.new("RGB", (cols * CW, len(lines) * CH), bg)
     d = ImageDraw.Draw(img)
-    f = font()
+    f, fb = font(), fallback_font()
     for y, line in enumerate(lines):
         x, fg, bg = 0, None, None
         for m in TOKEN.finditer(line):
@@ -98,7 +106,7 @@ def main(src, dst, bg=BG):
                         px, py = X + 2 + cx * 4, Y + 2 + cy * 4
                         d.rectangle([px, py, px + 1, py + 1], fill=col)
             elif ch != " ":
-                d.text((X, Y), ch, font=f, fill=col)
+                d.text((X, Y), ch, font=f if ord(ch) < 128 else fb, fill=col)
             x += 1
     img.save(dst)
 

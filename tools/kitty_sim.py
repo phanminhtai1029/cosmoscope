@@ -27,6 +27,9 @@ def main():
     cut = raw.rfind(b"\n") + 1
     text, cmds = raw[:cut], raw[cut:]
     ansi2png.CW, ansi2png.CH, ansi2png.FONT_SIZE = cw, ch, int(ch * 0.8)
+    ubuntu = "/usr/share/fonts/truetype/ubuntu/UbuntuSansMono[wght].ttf"
+    if os.path.exists(ubuntu) and ubuntu not in ansi2png.FONTS:
+        ansi2png.FONTS.insert(0, ubuntu)
     with tempfile.NamedTemporaryFile(suffix=".ans", delete=False) as t:
         t.write(text)
     ansi2png.main(t.name, a.dst, bg)
