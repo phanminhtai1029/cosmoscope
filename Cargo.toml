@@ -1,0 +1,24 @@
+[package]
+name = "cosmoscope"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A living, interactive Solar System in your terminal: real planet positions, time travel and planet deep dives"
+license = "MIT"
+repository = "https://github.com/phanminhtai1029/cosmoscope"
+readme = "README.md"
+keywords = ["terminal", "tui", "space", "solar-system", "astronomy"]
+categories = ["command-line-utilities", "science", "visualization"]
+exclude = ["assets/screenshots", "tools", ".github"]
+
+[dependencies]
+ratatui = "0.29"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,221 @@
+# Physical data: NASA Planetary Fact Sheet (https://nssdc.gsfc.nasa.gov/planetary/factsheet/)
+# and the NASA Sun Fact Sheet (https://nssdc.gsfc.nasa.gov/planetary/factsheet/sunfact.html).
+# rotation_hours is the sidereal rotation period, negative for retrograde spin.
+# day_hours is the solar day (sunrise to sunrise). Moon counts are as listed by NASA.
+# pole_ra / pole_dec: north pole direction (J2000 equatorial, degrees) from the IAU WGCCRE 2015 report.
+
+[[body]]
+id = "sun"
+name = "Sun"
+kind = "Yellow dwarf star (G2V)"
+radius_km = 695700.0
+mass_earths = 333000.0
+gravity = 274.0
+rotation_hours = 609.12
+day_hours = 0.0
+year_days = 0.0
+mean_temp_c = 5500.0
+moons = 0
+tilt_deg = 7.25
+pole_ra = 286.13
+pole_dec = 63.87
+color = "#ffcf6e"
+facts = [
+    "The Sun holds about 99.86% of all the mass in the Solar System.",
+    "Sunlight leaving the Sun's surface takes about 8 minutes 20 seconds to reach Earth.",
+    "The core is about 15 million degrees C. Every second, fusion there turns roughly 4 million tonnes of matter into energy.",
+    "About 1.3 million Earths would fit inside the Sun.",
+    "The Sun is about 4.6 billion years old, roughly halfway through its life as a hydrogen-burning star.",
+]
+
+[[body]]
+id = "mercury"
+name = "Mercury"
+kind = "Rocky planet"
+radius_km = 2439.5
+mass_earths = 0.0553
+gravity = 3.7
+rotation_hours = 1407.6
+day_hours = 4222.6
+year_days = 88.0
+mean_temp_c = 167.0
+moons = 0
+tilt_deg = 0.034
+pole_ra = 281.0103
+pole_dec = 61.4155
+color = "#a99e94"
+facts = [
+    "A solar day on Mercury (176 Earth days) lasts longer than its year (88 Earth days).",
+    "Mercury is closest to the Sun, yet Venus is hotter: Mercury has almost no atmosphere to hold heat.",
+    "Days reach about 430 C, while nights drop to about -180 C.",
+    "Craters near its poles stay in permanent shadow and hold water ice.",
+    "Mercury is shrinking. As its iron core cools, the planet contracts, wrinkling its crust into cliffs hundreds of kilometres long.",
+]
+
+[[body]]
+id = "venus"
+name = "Venus"
+kind = "Rocky planet"
+radius_km = 6052.0
+mass_earths = 0.815
+gravity = 8.9
+rotation_hours = -5832.5
+day_hours = 2802.0
+year_days = 224.7
+mean_temp_c = 464.0
+moons = 0
+tilt_deg = 177.4
+pole_ra = 272.76
+pole_dec = 67.16
+color = "#e8cf98"
+facts = [
+    "Venus spins backwards compared with most planets, so the Sun rises in the west.",
+    "One rotation of Venus takes 243 Earth days, longer than its 225-day year.",
+    "Its thick carbon dioxide atmosphere traps heat. The surface sits at about 464 C, hot enough to melt lead.",
+    "Surface pressure is about 92 times Earth's, like being 900 metres under the ocean.",
+    "After the Moon, Venus is the brightest natural object in the night sky.",
+]
+
+[[body]]
+id = "earth"
+name = "Earth"
+kind = "Rocky planet"
+radius_km = 6378.0
+mass_earths = 1.0
+gravity = 9.8
+rotation_hours = 23.93
+day_hours = 24.0
+year_days = 365.25
+mean_temp_c = 15.0
+moons = 1
+tilt_deg = 23.44
+pole_ra = 0.0
+pole_dec = 90.0
+color = "#4f8fe8"
+facts = [
+    "Earth is the densest planet in the Solar System.",
+    "About 71% of Earth's surface is covered by water.",
+    "Earth is the only planet whose English name does not come from Greek or Roman mythology.",
+    "The Moon drifts about 3.8 centimetres farther from Earth every year.",
+    "Tides are slowly braking Earth's spin: days grow longer by roughly 2 milliseconds per century.",
+]
+
+[[body]]
+id = "mars"
+name = "Mars"
+kind = "Rocky planet"
+radius_km = 3396.0
+mass_earths = 0.107
+gravity = 3.7
+rotation_hours = 24.6
+day_hours = 24.7
+year_days = 687.0
+mean_temp_c = -65.0
+moons = 2
+tilt_deg = 25.2
+pole_ra = 317.269
+pole_dec = 54.433
+color = "#d0663e"
+facts = [
+    "Olympus Mons is the tallest volcano in the Solar System, about 22 km high, roughly 2.5 times Mount Everest.",
+    "Mars is red because its dust is rich in iron oxide, the same compound as rust.",
+    "Valles Marineris is a canyon system about 4,000 km long. On Earth it would stretch across the United States.",
+    "Its moons Phobos and Deimos are tiny. Phobos spirals slowly inward and should break apart within about 50 million years.",
+    "A Martian day, called a sol, lasts about 24 hours 40 minutes.",
+]
+
+[[body]]
+id = "jupiter"
+name = "Jupiter"
+kind = "Gas giant"
+radius_km = 71492.0
+mass_earths = 317.8
+gravity = 23.1
+rotation_hours = 9.9
+day_hours = 9.9
+year_days = 4331.0
+mean_temp_c = -110.0
+moons = 95
+tilt_deg = 3.1
+pole_ra = 268.057
+pole_dec = 64.495
+color = "#d9b38c"
+facts = [
+    "Jupiter is more than twice as massive as all the other planets combined.",
+    "The Great Red Spot is a storm wider than Earth, and it has been watched for more than 150 years.",
+    "Jupiter has the shortest day of any planet, just under 10 hours.",
+    "Its moon Ganymede is the largest moon in the Solar System, bigger than the planet Mercury.",
+    "Jupiter has faint rings of dust, discovered by Voyager 1 in 1979.",
+]
+
+[[body]]
+id = "saturn"
+name = "Saturn"
+kind = "Gas giant"
+radius_km = 60268.0
+mass_earths = 95.2
+gravity = 9.0
+rotation_hours = 10.7
+day_hours = 10.7
+year_days = 10747.0
+mean_temp_c = -140.0
+moons = 274
+tilt_deg = 26.7
+pole_ra = 40.589
+pole_dec = 83.537
+color = "#e6cf98"
+facts = [
+    "Saturn's average density is lower than water's.",
+    "Its main rings span about 280,000 km, yet in many places they are only about 10 metres thick.",
+    "With 274 known moons, Saturn has more than any other planet.",
+    "Titan, its largest moon, has a thick atmosphere and lakes of liquid methane and ethane.",
+    "A six-sided jet stream about 30,000 km across circles Saturn's north pole.",
+]
+
+[[body]]
+id = "uranus"
+name = "Uranus"
+kind = "Ice giant"
+radius_km = 25559.0
+mass_earths = 14.5
+gravity = 8.7
+rotation_hours = -17.2
+day_hours = 17.2
+year_days = 30589.0
+mean_temp_c = -195.0
+moons = 28
+tilt_deg = 97.8
+pole_ra = 257.311
+pole_dec = -15.175
+color = "#a6e4e8"
+facts = [
+    "Uranus is tipped over by about 98 degrees, so it rolls around the Sun on its side.",
+    "Each pole gets about 42 years of continuous sunlight, followed by 42 years of darkness.",
+    "It was the first planet found with a telescope, by William Herschel in 1781.",
+    "Uranus has the coldest atmosphere of any planet, down to about -224 C.",
+    "It is circled by 13 known faint, dark rings.",
+]
+
+[[body]]
+id = "neptune"
+name = "Neptune"
+kind = "Ice giant"
+radius_km = 24764.0
+mass_earths = 17.1
+gravity = 11.0
+rotation_hours = 16.1
+day_hours = 16.1
+year_days = 59800.0
+mean_temp_c = -200.0
+moons = 16
+tilt_deg = 28.3
+pole_ra = 299.36
+pole_dec = 43.46
+color = "#5b7cf0"
+facts = [
+    "Neptune has the fastest winds in the Solar System, over 2,000 km/h.",
+    "It was found in 1846 by mathematics: its position was predicted from tugs on Uranus's orbit before anyone saw it.",
+    "One Neptune year lasts about 165 Earth years. It completed its first orbit since discovery in 2011.",
+    "Its largest moon, Triton, orbits backwards and is slowly spiralling towards Neptune.",
+    "Sunlight at Neptune is about 900 times dimmer than at Earth.",
+]
