@@ -24,6 +24,9 @@ pub struct Placed {
     pub y_off: u32,
     /// Visible part of the image (x, y, w, h), in image pixels.
     pub src: (u32, u32, u32, u32),
+    /// Stretch the visible part over this many cells (0: show it at its own size).
+    pub cols: u32,
+    pub rows: u32,
     /// Full image size and pixels (empty when `keep`).
     pub w: u32,
     pub h: u32,
@@ -112,9 +115,14 @@ fn delete(out: &mut impl Write, id: u32) -> io::Result<()> {
 /// Show (or move) image `id` at the placement's cell and pixel offset, cropped to `src`.
 fn place(out: &mut impl Write, id: u32, p: &Placed) -> io::Result<()> {
     let (sx, sy, sw, sh) = p.src;
+    let scale = if p.cols > 0 {
+        format!(",c={},r={}", p.cols, p.rows)
+    } else {
+        String::new()
+    };
     write!(
         out,
-        "\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x={sx},y={sy},w={sw},h={sh},X={},Y={},C=1,z={},q=2\x1b\\",
+        "\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x={sx},y={sy},w={sw},h={sh},X={},Y={}{scale},C=1,z={},q=2\x1b\\",
         p.row as u32 + 1,
         p.col as u32 + 1,
         p.x_off,
@@ -124,15 +132,63 @@ fn place(out: &mut impl Write, id: u32, p: &Placed) -> io::Result<()> {
 }
 
 static FILE_SEQ: AtomicU64 = AtomicU64::new(0);
+static TEMP_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-/// Temporary files must live in the temp dir and carry this marker, or the terminal
-/// refuses (and does not delete) them.
-fn temp_path() -> PathBuf {
+/// Where temporary image files may go. The temp dir is accepted by every terminal; files are
+/// read and deleted within milliseconds, so they rarely reach the disk. /dev/shm (RAM) is the
+/// fallback for terminals that only trust it.
+fn temp_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![std::env::temp_dir()];
+    let shm = PathBuf::from("/dev/shm");
+    if shm.is_dir() && !dirs.contains(&shm) {
+        dirs.push(shm);
+    }
+    dirs
+}
+
+/// Remove image files left behind by earlier runs that were killed mid-frame, and (at exit)
+/// any of our own the terminal did not get to.
+pub fn sweep_temp_files(include_ours: bool) {
+    let me = std::process::id();
+    for dir in temp_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(rest) = name.strip_prefix("cosmoscope-tty-graphics-protocol-") else {
+                continue;
+            };
+            let pid: u32 = rest
+                .split('-')
+                .next()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0);
+            let alive = pid != me && std::path::Path::new(&format!("/proc/{pid}")).exists();
+            if (pid == me && include_ours) || (pid != me && !alive) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// Temporary files must live in a temp dir the terminal trusts and carry this marker, or the
+/// terminal refuses (and does not delete) them.
+fn temp_path_in(dir: &std::path::Path) -> PathBuf {
     let n = FILE_SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
+    dir.join(format!(
         "cosmoscope-tty-graphics-protocol-{}-{n}.rgba",
         std::process::id()
     ))
+}
+
+fn temp_path() -> PathBuf {
+    let dir = TEMP_DIR
+        .lock()
+        .ok()
+        .and_then(|d| d.clone())
+        .unwrap_or_else(std::env::temp_dir);
+    temp_path_in(&dir)
 }
 
 fn transmit(
@@ -176,6 +232,8 @@ fn transmit(
 pub struct Probe {
     path: PathBuf,
     since: std::time::Instant,
+    /// Temp dirs still to try after this one.
+    rest: Vec<PathBuf>,
 }
 
 const PROBE_ID: u32 = BASE_ID - 1;
@@ -193,29 +251,47 @@ impl Probe {
         if !var("SSH_CONNECTION").is_empty() || !var("SSH_TTY").is_empty() {
             return Err(Transfer::Direct);
         }
-        let path = temp_path();
-        std::fs::write(&path, [0u8; 4]).map_err(|_| Transfer::Direct)?;
-        let name = base64(path.to_string_lossy().as_bytes());
-        let _ = write!(
-            out,
-            "\x1b_Ga=t,t=t,q=2,f=32,s=1,v=1,i={PROBE_ID};{name}\x1b\\"
-        );
-        let _ = out.flush();
-        Ok(Probe {
-            path,
-            since: std::time::Instant::now(),
-        })
+        Probe::try_dirs(out, temp_dirs()).ok_or(Transfer::Direct)
     }
 
-    /// The verdict, once there is one.
-    pub fn poll(&self, out: &mut impl Write) -> Option<Transfer> {
+    fn try_dirs(out: &mut impl Write, mut dirs: Vec<PathBuf>) -> Option<Probe> {
+        while !dirs.is_empty() {
+            let dir = dirs.remove(0);
+            let path = temp_path_in(&dir);
+            if std::fs::write(&path, [0u8; 4]).is_err() {
+                continue;
+            }
+            let name = base64(path.to_string_lossy().as_bytes());
+            let _ = write!(
+                out,
+                "\x1b_Ga=t,t=t,q=2,f=32,s=1,v=1,i={PROBE_ID};{name}\x1b\\"
+            );
+            let _ = out.flush();
+            return Some(Probe {
+                path,
+                since: std::time::Instant::now(),
+                rest: dirs,
+            });
+        }
+        None
+    }
+
+    /// The verdict, once there is one. A directory the terminal ignores is cleaned up and
+    /// the next one is tried.
+    pub fn poll(&mut self, out: &mut impl Write) -> Option<Transfer> {
         if !self.path.exists() {
             let _ = delete(out, PROBE_ID);
+            if let (Ok(mut d), Some(dir)) = (TEMP_DIR.lock(), self.path.parent()) {
+                *d = Some(dir.to_path_buf());
+            }
             return Some(Transfer::TempFile);
         }
         if self.since.elapsed() > std::time::Duration::from_secs(2) {
             let _ = std::fs::remove_file(&self.path);
-            return Some(Transfer::Direct);
+            match Probe::try_dirs(out, std::mem::take(&mut self.rest)) {
+                Some(next) => *self = next,
+                None => return Some(Transfer::Direct),
+            }
         }
         None
     }
@@ -280,6 +356,8 @@ mod tests {
             x_off: 4,
             y_off: 5,
             src: (0, 0, 1, 1),
+            cols: 0,
+            rows: 0,
             w: 1,
             h: 1,
             rgba: if keep { vec![] } else { vec![255; 4] },

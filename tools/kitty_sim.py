@@ -47,6 +47,9 @@ def main():
             sx, sy = int(k.get(b"x", 0)), int(k.get(b"y", 0))
             sw, sh = int(k.get(b"w", pic.width)), int(k.get(b"h", pic.height))
             pic = pic.crop((sx, sy, sx + sw, sy + sh))
+            cols, rows = int(k.get(b"c", 0)), int(k.get(b"r", 0))
+            if cols and rows:
+                pic = pic.resize((cols * cw, rows * ch), Image.BILINEAR)
             pos = ((cursor[1] - 1) * cw + int(k.get(b"X", 0)), (cursor[0] - 1) * ch + int(k.get(b"Y", 0)))
             # like a real terminal: stack by z-index, then by image id, not by arrival order
             placed[(int(k[b"i"]), int(k.get(b"p", 0)))] = (int(k.get(b"z", 0)), int(k[b"i"]), pic, pos)

@@ -141,7 +141,7 @@ cosmoscope --no-panel --no-rotate
 - **For the best picture, use a terminal with the kitty graphics protocol.** Good choices are [Ghostty](https://ghostty.org), [kitty](https://sw.kovidgoyal.net/kitty/) or [WezTerm](https://wezfurlong.org/wezterm/), on Linux or macOS. HD switches on automatically, and the status bar shows **HD**. Inside tmux or screen, images do not pass through, so cosmoscope falls back to text.
   - Ubuntu: `sudo snap install ghostty --classic`
   - macOS: `brew install --cask ghostty`
-- **HD needs a little more power.** It uses about half a CPU core, plus some work in the terminal itself. On a local machine, images go through temporary files that the terminal reads directly. Over SSH they are sent inline, so use `--graphics off` or a lower `--fps` on slow links.
+- **HD needs a little more power.** It uses roughly half to one CPU core (most when flying close to a spinning Earth), plus some work in the terminal itself. On a local machine, images go through temporary files that the terminal reads directly. Over SSH they are sent inline, so use `--graphics off` or a lower `--fps` on slow links.
 - **Fonts.** Bodies are drawn with half blocks (`▀▄`) and orbits with braille dots (`⣿`). Any modern monospace font has them: JetBrains Mono, Cascadia Code, Fira Code, DejaVu Sans Mono, SF Mono, Menlo or Nerd Fonts.
 - **Colour.** Most terminals get 24-bit colour automatically, including GNOME Terminal, Konsole, kitty, Alacritty, WezTerm, Ghostty, iTerm2 and Windows Terminal. macOS Terminal.app gets the 256-colour fallback. Inside tmux, either enable RGB (`set -as terminal-features ",*:RGB"`) or run with `--colors truecolor`.
 - **Size.** It works from 80×24 upwards, and it looks best at 120×40 or larger with a small font.

@@ -39,9 +39,6 @@ impl V3 {
             self
         }
     }
-    pub fn lerp(self, o: V3, t: f64) -> V3 {
-        self + (o - self) * t
-    }
     /// Rotate about the x axis by `a` radians.
     pub fn rot_x(self, a: f64) -> V3 {
         let (s, c) = a.sin_cos();

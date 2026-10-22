@@ -5,6 +5,7 @@ mod data;
 mod ephemeris;
 mod kitty;
 mod math;
+mod profile;
 mod render;
 mod textures;
 mod time;
@@ -158,11 +159,20 @@ fn run(args: Args) -> Result<(), String> {
     }
 
     textures::warm_up();
+    // a small pool renders the images just as fast as one thread per core, while idle
+    // workers spinning on every core would burn far more CPU
+    let workers = std::thread::available_parallelism()
+        .map_or(2, |n| n.get() / 2)
+        .clamp(2, 4);
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build_global();
     let mut terminal = ratatui::init();
     let mut transfer = (kitty::Transfer::Direct, None);
     if want_hd {
         app.hd = cell_size();
         if app.hd.is_some() {
+            kitty::sweep_temp_files(false);
             transfer = match kitty::Probe::start(&mut io::stdout()) {
                 Ok(probe) => (kitty::Transfer::Direct, Some(probe)),
                 Err(t) => (t, None),
@@ -185,6 +195,7 @@ fn run(args: Args) -> Result<(), String> {
         args.fps,
     );
     let _ = gfx.clear(&mut io::stdout());
+    kitty::sweep_temp_files(true);
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result.map_err(|e| e.to_string())
@@ -217,22 +228,23 @@ fn event_loop(
     let mut last = Instant::now();
     while !app.quit {
         let now = Instant::now();
-        app.update((now - last).as_secs_f64().min(0.1));
+        profile::time("update", || app.update((now - last).as_secs_f64().min(0.1)));
         last = now;
         if app.hd.is_some() {
             let mut out = io::stdout();
-            if let Some(verdict) = probe.as_ref().and_then(|p| p.poll(&mut out)) {
+            if let Some(verdict) = probe.as_mut().and_then(|p| p.poll(&mut out)) {
                 transfer = verdict;
                 probe = None;
             }
             // text and images land together, so planets never lag behind their labels
             execute!(out, BeginSynchronizedUpdate)?;
-            terminal.draw(|f| ui::draw(f, app))?;
-            gfx.frame(&mut out, &app.images, transfer)?;
+            profile::time("draw", || terminal.draw(|f| ui::draw(f, app)))?;
+            profile::time("gfx", || gfx.frame(&mut out, &app.images, transfer))?;
             execute!(out, EndSynchronizedUpdate)?;
         } else {
-            terminal.draw(|f| ui::draw(f, app))?;
+            profile::time("draw", || terminal.draw(|f| ui::draw(f, app)))?;
         }
+        profile::end_frame();
         let deadline = now + frame;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());

@@ -457,6 +457,8 @@ pub struct Frame<'a> {
     pub jd: f64,
     /// Date driving planet spin; it never runs faster than an hour per second.
     pub spin_jd: f64,
+    /// How fast `spin_jd` advances, in days per real second (0 when paused).
+    pub spin_rate: f64,
     pub t: f64,
     pub cam: Camera,
     pub selected: usize,
@@ -467,14 +469,10 @@ pub struct Frame<'a> {
     pub hd: Option<(u32, u32)>,
     /// What each image slot last showed, so slow-changing images need not be redrawn every frame.
     pub sent: Option<&'a std::collections::HashMap<u32, Sent>>,
-}
-
-/// Size of an image slot's last picture and when it was drawn.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Sent {
-    pub w: u32,
-    pub h: u32,
-    pub t: f64,
+    /// Pixels that may still be redrawn this frame; once spent, images that already have a
+    /// picture on screen are only moved until a later frame, so no frame has to redraw
+    /// several big images at once.
+    pub budget: Option<&'a std::cell::Cell<u64>>,
 }
 
 pub struct Scene {
@@ -482,6 +480,9 @@ pub struct Scene {
     milky: Vec<(V3, f64)>,
     belt: Vec<Particle>,
     kuiper: Vec<Particle>,
+    /// Orbit outlines in display space and the date they were computed for; their shapes
+    /// drift over centuries, so they are only recomputed after a month of simulated time.
+    orbit_cache: std::cell::RefCell<Option<(f64, Vec<Vec<V3>>)>>,
 }
 
 /// Galactic north pole and centre in ecliptic coordinates.
@@ -557,6 +558,7 @@ impl Scene {
             milky,
             belt: particles(31, 1100, (2.1, 3.3), 0.12, 0.2, (0.45, 1.0)),
             kuiper: particles(41, 650, (30.0, 50.0), 0.1, 0.25, (0.3, 0.7)),
+            orbit_cache: std::cell::RefCell::new(None),
         }
     }
 
@@ -564,7 +566,7 @@ impl Scene {
         cv.clear();
         let h = cv.h as f64;
         let view = View::new(&fr.cam, 2.0 * h, fr.center_x);
-        self.sky(cv, &view, fr.t);
+        crate::profile::time("sky", || self.sky(cv, &view, fr.t));
 
         let sun_proj = view.project(V3::ZERO).filter(|_| fr.hd.is_none());
         if let Some((sx, sy, sd)) = sun_proj {
@@ -576,7 +578,8 @@ impl Scene {
                 fr.t,
             );
         }
-        self.orbits(cv, &view, fr);
+        crate::profile::time("orbits", || self.orbits(cv, &view, fr));
+        let t_particles = std::time::Instant::now();
         for (list, col, strength) in [
             (&self.belt, Rgb::hex(0xa89a86), 0.45),
             (&self.kuiper, Rgb::hex(0x6f7d9c), 0.28),
@@ -594,6 +597,8 @@ impl Scene {
             }
         }
 
+        crate::profile::since("particles", t_particles);
+        let t_bodies = std::time::Instant::now();
         let mut hits = Vec::new();
         let mut order: Vec<(usize, V3, f64)> = (0..fr.bodies.len())
             .filter_map(|i| {
@@ -620,10 +625,12 @@ impl Scene {
             match fr.hd {
                 Some(cell) => {
                     cv.reserve(g.cx, g.cy * 0.5, g.sr, g.sr * 0.5);
-                    sprites.extend(body_sprite(&g, i as u32, cell, fr.sent).map(|s| Sprite {
-                        z: 1 + rank as i32,
-                        ..s
-                    }));
+                    sprites.extend(
+                        body_sprite(&g, i as u32, cell, fr.sent, fr.budget).map(|s| Sprite {
+                            z: 1 + rank as i32,
+                            ..s
+                        }),
+                    );
                 }
                 None => draw_body(cv, &g),
             }
@@ -634,6 +641,7 @@ impl Scene {
                 r: g.sr * if g.has_ring { 1.6 } else { 1.0 },
             });
         }
+        crate::profile::since("bodies", t_bodies);
         for hit in &hits {
             let body = &fr.bodies[hit.body];
             let sel = hit.body == fr.selected;
@@ -690,7 +698,9 @@ impl Scene {
         }
         for s in &self.stars {
             if let Some((x, y)) = view.project_dir(s.dir) {
-                let tw = 0.65 + 0.35 * (t * s.speed + s.phase).sin();
+                // twinkle in steps of 1/8 s: as lively to the eye, far fewer cells to redraw
+                let tq = (t * 8.0).floor() / 8.0;
+                let tw = 0.65 + 0.35 * (tq * s.speed + s.phase).sin();
                 let b = s.bright * tw;
                 if b < 0.04 {
                     continue;
@@ -716,15 +726,29 @@ impl Scene {
     }
 
     fn orbits(&self, cv: &mut Canvas, view: &View, fr: &Frame) {
+        let mut cache = self.orbit_cache.borrow_mut();
+        if cache
+            .as_ref()
+            .is_none_or(|(jd, _)| (jd - fr.jd).abs() > 30.0)
+        {
+            let n = 360;
+            let paths = (1..fr.bodies.len())
+                .map(|i| {
+                    let orbit = ephemeris::orbit(i - 1, fr.jd);
+                    (0..=n)
+                        .map(|k| to_display(orbit.position_at(k as f64 / n as f64 * TAU)))
+                        .collect()
+                })
+                .collect();
+            *cache = Some((fr.jd, paths));
+        }
+        let paths = &cache.as_ref().expect("filled above").1;
         for i in 1..fr.bodies.len() {
-            let orbit = ephemeris::orbit(i - 1, fr.jd);
             let sel = i == fr.selected;
             let base = Rgb::hex(0x39406a).mix(fr.bodies[i].rgb(), if sel { 0.85 } else { 0.25 });
             let strength = if sel { 1.0 } else { 0.55 };
-            let n = 360;
             let mut prev: Option<(f64, f64)> = None;
-            for k in 0..=n {
-                let p = to_display(orbit.position_at(k as f64 / n as f64 * TAU));
+            for &p in &paths[i - 1] {
                 match view.project(p) {
                     Some((x, y, d)) => {
                         let pt = (x * 2.0, y * 2.0);
@@ -797,6 +821,8 @@ pub struct BodyGeom<'a> {
     /// 0 keeps only the broad colours (small text-mode discs), 1 keeps all surface detail.
     detail: f64,
     has_ring: bool,
+    /// How fast the visible surface changes, in radians per second (spin plus camera drift).
+    surface_speed: f64,
     /// Pixel back end: photographic lighting instead of the text renderer's readable one.
     hd: bool,
     axis: V3,
@@ -869,6 +895,14 @@ fn body_geom<'a>(view: &View, fr: &Frame<'a>, i: usize, pos: V3) -> Option<BodyG
         ambient,
         detail,
         has_ring,
+        surface_speed: 0.03
+            + TAU
+                * if id == "earth" {
+                    1.002_738 * fr.spin_rate
+                } else {
+                    fr.spin_rate * 24.0 / body.rotation_hours.abs()
+                }
+            + if i == 0 { TAU / 70.0 } else { 0.0 },
         hd: fr.hd.is_some(),
         axis,
         axes: body_axes(axis),
@@ -920,12 +954,19 @@ impl BodyGeom<'_> {
             return (self.sun_surface(nb, wp), wp);
         }
         let (lon, lat) = lon_lat(nb);
-        let cloud = if self.id == "earth" {
-            earth_clouds(lon, lat, self.t)
+        let (cloud, ground) = if self.id == "earth" {
+            (
+                earth_clouds(lon, lat, self.t),
+                textures::earth_day().sample(lon, lat),
+            )
         } else {
-            0.0
+            (0.0, Rgb::BLACK)
         };
-        let mut tex = surface(self.id, nb, self.t);
+        let mut tex = if self.id == "earth" {
+            ground.mix(Rgb::hex(0xf4f6fb), cloud)
+        } else {
+            surface(self.id, nb, self.t)
+        };
         if self.id == "earth" && !self.hd {
             // the Blue Marble oceans are very dark; lift them so Earth reads as blue in text
             let water = smoothstep(0.05, 0.12, tex.b - tex.r.max(tex.g) * 0.8) * (1.0 - cloud);
@@ -962,7 +1003,6 @@ impl BodyGeom<'_> {
         let ambient = 0.04 + 0.24 * (1.0 - smoothstep(4.0, 14.0, self.sr));
         let mut c = tex.scale(ambient + (1.0 - ambient) * lit * limb);
         if self.id == "earth" {
-            let ground = textures::earth_day().sample(lon, lat);
             let water =
                 smoothstep(0.02, 0.08, ground.b - ground.r.max(ground.g) * 0.9) * (1.0 - cloud);
             // sun glint on the oceans
@@ -1105,84 +1145,165 @@ fn draw_body(cv: &mut Canvas, g: &BodyGeom) {
     }
 }
 
-/// An RGBA image drawn over the text by the graphics back end, positioned to the pixel.
+/// An RGBA image drawn over the text by the graphics back end.
+///
+/// Small and medium images are rendered at full resolution and placed to the pixel, so they
+/// can glide between redraws. Big ones are snapped to the cell grid, rendered at a capped
+/// resolution and stretched by the terminal (`cols` x `rows` cells), which costs nothing.
 pub struct Sprite {
     /// Identifies what it shows across frames (body index, or a panel slot).
     pub slot: u32,
     /// Top-left corner in screen pixels, relative to the canvas.
     pub x: f64,
     pub y: f64,
+    /// Image size in pixels.
     pub w: u32,
     pub h: u32,
+    /// Display size in cells when the terminal scales the image; 0 means native size.
+    pub cols: u32,
+    pub rows: u32,
     pub rgba: Vec<u8>,
     /// The picture has not changed enough to redraw: just move the one on screen.
     pub keep: bool,
     /// Stacking order among images: nearer bodies get higher values.
     pub z: i32,
+    /// A quick low-resolution draw taken while zooming, to be sharpened shortly.
+    pub low: bool,
 }
 
-/// Images bigger than this are shaded at half resolution and smoothly upscaled, which keeps
-/// very close fly-bys fast; at that size the difference is hard to see.
-const HALF_RES_PIXELS: u64 = 600_000;
+/// What a slot last showed: its on-screen box (pixels), image size, when, and whether it was
+/// a quick low-resolution draw taken while zooming.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sent {
+    pub box_w: u32,
+    pub box_h: u32,
+    pub w: u32,
+    pub h: u32,
+    pub t: f64,
+    pub low: bool,
+}
 
-/// HD back end: render the body at true pixel resolution with anti-aliased edges, a soft
-/// corona for the Sun and a thin atmosphere halo for planets that have one.
+impl Sprite {
+    /// Bookkeeping for a freshly drawn sprite whose on-screen box is `box_w` x `box_h` pixels.
+    pub fn sent(&self, t: f64, cell: (u32, u32)) -> Sent {
+        let (box_w, box_h) = if self.cols > 0 {
+            (self.cols * cell.0, self.rows * cell.1)
+        } else {
+            (self.w, self.h)
+        };
+        Sent {
+            box_w,
+            box_h,
+            w: self.w,
+            h: self.h,
+            t,
+            low: self.low,
+        }
+    }
+}
+
+/// Image pixels that may be redrawn per frame (see Frame::budget).
+pub const REDRAW_BUDGET: u64 = 220_000;
+/// Above this many pixels an image snaps to the cell grid and is rendered at most this big.
+const PRECISE_MAX: u64 = 200_000;
+/// While a big image changes size (zooming), it is rendered at most this big, then sharpened.
+const ZOOM_PIXELS: u64 = 50_000;
+
+/// HD back end: render the body with anti-aliased edges, a soft corona for the Sun and a thin
+/// atmosphere halo for planets that have one.
 fn body_sprite(
     g: &BodyGeom,
     slot: u32,
     cell: (u32, u32),
     sent: Option<&std::collections::HashMap<u32, Sent>>,
+    budget: Option<&std::cell::Cell<u64>>,
 ) -> Option<Sprite> {
     let (cw, ch) = (cell.0 as f64, cell.1 as f64);
     // centre in screen pixels; the radius uses the horizontal metric so the disc stays round
     let (x, y) = (g.cx * cw, g.cy * ch * 0.5);
     let r_px = g.sr * cw;
     let ext = r_px * g.reach() + 1.0;
-    let (x0, y0) = ((x - ext).floor(), (y - ext).floor());
-    let size = (2.0 * ext).ceil() as u32 + 1;
-    let px = size as u64 * size as u64;
-    // Motion comes from moving the image every frame, which costs almost nothing. What it
-    // shows (spin, phase, the corona's flicker) changes slowly, so it is redrawn less often,
-    // and the bigger it is the less often.
-    let interval = if slot == CARD_SLOT || px > 150_000 {
-        1.0 / 8.0
-    } else if g.i == 0 {
-        1.0 / 12.0
-    } else if px > 20_000 {
-        1.0 / 10.0
+    let side = (2.0 * ext).ceil() as u32 + 1;
+    let big = side as u64 * side as u64 > PRECISE_MAX;
+    // the box on screen: pixel-exact for normal images, whole cells for big ones
+    let (bx, by, bw, bh, cols, rows) = if big {
+        let (c0, r0) = (((x - ext) / cw).floor(), ((y - ext) / ch).floor());
+        let (c1, r1) = (((x + ext) / cw).ceil(), ((y + ext) / ch).ceil());
+        let (cols, rows) = ((c1 - c0) as u32, (r1 - r0) as u32);
+        (c0 * cw, r0 * ch, cols * cell.0, rows * cell.1, cols, rows)
     } else {
-        1.0 / 15.0
+        ((x - ext).floor(), (y - ext).floor(), side, side, 0, 0)
     };
-    if let Some(prev) = sent.and_then(|m| m.get(&slot)) {
-        if prev.w.abs_diff(size) <= 1 && g.t - prev.t < interval {
-            return Some(Sprite {
-                slot,
-                x: x0,
-                y: y0,
-                w: prev.w,
-                h: prev.h,
-                rgba: Vec::new(),
-                keep: true,
-                z: 1,
-            });
+    let (box_w, box_h) = (bw, bh);
+    let prev = sent.and_then(|m| m.get(&slot));
+    // a picture of the wrong size is never shown: any change of size is redrawn at once
+    let same_size =
+        prev.is_some_and(|p| p.box_w.abs_diff(box_w) <= 1 && p.box_h.abs_diff(box_h) <= 1);
+    let px = bw as u64 * bh as u64;
+    // Otherwise what it shows (spin, phase, the corona's flicker) changes slowly, so it is
+    // redrawn less often, and the bigger it is the less often. A quick zoom-time draw is
+    // sharpened as soon as the size settles.
+    // redraw when the surface has drifted a few pixels: 3 on a small disc, a little more on
+    // a big one, where that is still a fraction of a degree (the Sun also boils, so it is
+    // redrawn at least 8 times a second)
+    let step = 3.0 + r_px / 60.0;
+    let drift = (step / (r_px * g.surface_speed).max(1e-6)).clamp(1.0 / 15.0, 0.4);
+    let interval = match prev {
+        Some(p) if p.low => 0.15,
+        _ if g.i == 0 => drift.min(1.0 / 8.0),
+        _ => drift,
+    };
+    let keep = |p: &Sent| Sprite {
+        slot,
+        x: bx,
+        y: by,
+        w: p.w,
+        h: p.h,
+        cols,
+        rows,
+        rgba: Vec::new(),
+        keep: true,
+        z: 1,
+        low: p.low,
+    };
+    if let Some(p) = prev.filter(|_| same_size) {
+        if g.t - p.t < interval {
+            return Some(keep(p));
+        }
+        // a routine refresh may wait for a later frame when this one is busy; the first
+        // redraw of a frame always goes ahead, and a picture twice as late jumps the queue
+        if let Some(budget) = budget {
+            let cost = px.min(PRECISE_MAX);
+            let overdue = g.t - p.t > 2.0 * interval;
+            if cost > budget.get() && budget.get() < REDRAW_BUDGET && !overdue {
+                return Some(keep(p));
+            }
+            budget.set(budget.get().saturating_sub(cost));
         }
     }
-    let half = px > HALF_RES_PIXELS;
-    let (step, rs) = if half {
-        (2.0, size.div_ceil(2))
+    // resolution: full for normal images; capped for big ones, lower still while zooming
+    let zooming = big && prev.is_some() && !same_size;
+    let cap = if zooming { ZOOM_PIXELS } else { PRECISE_MAX };
+    let scale = if big {
+        (cap as f64 / px as f64).sqrt().min(1.0)
     } else {
-        (1.0, size)
+        1.0
     };
+    let (w, h) = (
+        ((bw as f64 * scale).round() as u32).max(1),
+        ((bh as f64 * scale).round() as u32).max(1),
+    );
+    let (sx, sy) = (bw as f64 / w as f64, bh as f64 / h as f64);
     let atmo = g.atmosphere();
-    let mut rgba = vec![0u8; (rs * rs * 4) as usize];
-    par_rows(&mut rgba, rs as usize, |iy, line| {
-        for ix in 0..rs as usize {
-            let px = x0 + (ix as f64 + 0.5) * step;
-            let py = y0 + (iy as f64 + 0.5) * step;
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    par_rows(&mut rgba, w as usize, |iy, line| {
+        for ix in 0..w as usize {
+            let px = bx + (ix as f64 + 0.5) * sx;
+            let py = by + (iy as f64 + 0.5) * sy;
             let (u, v) = ((px - x) / r_px, -(py - y) / r_px);
             let d = (u * u + v * v).sqrt();
             // planet coverage, supersampled near the rim for a clean edge
-            let edge = 1.5 * step / r_px;
+            let edge = 1.5 * sx.max(sy) / r_px;
             let cov = if d < 1.0 - edge {
                 1.0
             } else if d > 1.0 + edge {
@@ -1191,8 +1312,8 @@ fn body_sprite(
                 let mut n = 0;
                 for k in 0..16 {
                     let (a, b) = ((k % 4) as f64 + 0.5, (k / 4) as f64 + 0.5);
-                    let su = (x0 + (ix as f64 + a / 4.0) * step - x) / r_px;
-                    let sv = -(y0 + (iy as f64 + b / 4.0) * step - y) / r_px;
+                    let su = (bx + (ix as f64 + a / 4.0) * sx - x) / r_px;
+                    let sv = -(by + (iy as f64 + b / 4.0) * sy - y) / r_px;
                     n += (su * su + sv * sv <= 1.0) as u32;
                 }
                 n as f64 / 16.0
@@ -1236,39 +1357,19 @@ fn body_sprite(
             ]);
         }
     });
-    if half {
-        rgba = upscale2(&rgba, rs as usize, size as usize);
-    }
     Some(Sprite {
         slot,
-        x: x0,
-        y: y0,
-        w: size,
-        h: size,
+        x: bx,
+        y: by,
+        w,
+        h,
+        cols,
+        rows,
         rgba,
         keep: false,
         z: 1,
+        low: zooming,
     })
-}
-
-/// Bilinear 2x upscale of a square RGBA image from `n` to `m` pixels a side.
-fn upscale2(src: &[u8], n: usize, m: usize) -> Vec<u8> {
-    let mut out = vec![0u8; m * m * 4];
-    let at = |x: usize, y: usize, c: usize| src[(y.min(n - 1) * n + x.min(n - 1)) * 4 + c] as f64;
-    for y in 0..m {
-        let fy = ((y as f64 + 0.5) / 2.0 - 0.5).max(0.0);
-        let (y0, ty) = (fy.floor() as usize, fy - fy.floor());
-        for x in 0..m {
-            let fx = ((x as f64 + 0.5) / 2.0 - 0.5).max(0.0);
-            let (x0, tx) = (fx.floor() as usize, fx - fx.floor());
-            for c in 0..4 {
-                let top = at(x0, y0, c) + (at(x0 + 1, y0, c) - at(x0, y0, c)) * tx;
-                let bot = at(x0, y0 + 1, c) + (at(x0 + 1, y0 + 1, c) - at(x0, y0 + 1, c)) * tx;
-                out[(y * m + x) * 4 + c] = (top + (bot - top) * ty + 0.5) as u8;
-            }
-        }
-    }
-    out
 }
 
 /// Porter-Duff "over" for straight (non-premultiplied) colour and alpha.
@@ -1287,33 +1388,24 @@ fn over(top: (Rgb, f64), below: (Rgb, f64)) -> (Rgb, f64) {
 
 /// Fill an RGBA buffer row by row on all CPU cores.
 fn par_rows(buf: &mut [u8], w: usize, f: impl Fn(usize, &mut [u8]) + Sync) {
+    use rayon::prelude::*;
     let stride = w * 4;
     if stride == 0 {
         return;
     }
-    let rows = buf.len() / stride;
-    // threads only pay off for big images; small ones are cheaper on this thread
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(buf.len() / (4 * 40_000))
-        .clamp(1, 8);
-    if threads == 1 {
+    // small images are cheaper on this thread; bigger ones go to the shared thread pool in
+    // chunks of a few thousand pixels
+    if buf.len() < 4 * 6_000 {
         for (j, line) in buf.chunks_mut(stride).enumerate() {
             f(j, line);
         }
         return;
     }
-    let per = rows.div_ceil(threads).max(1);
-    std::thread::scope(|s| {
-        for (k, chunk) in buf.chunks_mut(per * stride).enumerate() {
-            let f = &f;
-            s.spawn(move || {
-                for (j, line) in chunk.chunks_mut(stride).enumerate() {
-                    f(k * per + j, line);
-                }
-            });
-        }
-    });
+    let rows_per_task = (4_000 / w).max(1);
+    buf.par_chunks_mut(stride)
+        .enumerate()
+        .with_min_len(rows_per_task)
+        .for_each(|(j, line)| f(j, line));
 }
 
 /// A close-up of one body, lit from its true Sun direction, for the info panel.
@@ -1354,7 +1446,7 @@ pub fn render_card(cv: &mut Canvas, scene: &Scene, fr: &Frame, i: usize) -> Opti
     scene.sky(cv, &view, fr.t);
     let g = body_geom(&view, &card, i, pos)?;
     match fr.hd {
-        Some(cell) => body_sprite(&g, CARD_SLOT, cell, fr.sent),
+        Some(cell) => body_sprite(&g, CARD_SLOT, cell, fr.sent, fr.budget),
         None => {
             if i == 0 {
                 sun_glow(cv, view.cx, view.cy, want, fr.t);
@@ -1456,6 +1548,7 @@ mod tests {
             bodies: &bodies,
             jd: crate::time::parse_date("2026-10-22").unwrap(),
             spin_jd: 0.0,
+            spin_rate: 1.0 / 24.0,
             t: 0.0,
             cam,
             selected: 3,
@@ -1463,6 +1556,7 @@ mod tests {
             center_x: 80.0,
             hd: Some((10, 20)),
             sent: None,
+            budget: None,
         };
         let mut cv = Canvas::new(160, 50);
         let (_, sprites) = Scene::new().render(&mut cv, &fr);
@@ -1488,5 +1582,75 @@ mod tests {
         let saturn = &crate::data::load()[6];
         let tilt = saturn.pole().dot(V3::Z).acos().to_degrees();
         assert!((tilt - 28.0).abs() < 1.5, "{tilt}");
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    fn frame<'a>(
+        bodies: &'a [Body],
+        sent: &'a std::collections::HashMap<u32, Sent>,
+        budget: &'a std::cell::Cell<u64>,
+        t: f64,
+        dist: f64,
+    ) -> Frame<'a> {
+        let jd = crate::time::parse_date("2026-10-22").unwrap();
+        Frame {
+            bodies,
+            jd,
+            spin_jd: 0.0,
+            spin_rate: 1.0 / 24.0,
+            t,
+            cam: Camera {
+                target: body_position(3, jd),
+                dist,
+                az: -1.2,
+                el: 0.3,
+            },
+            selected: 3,
+            focused: Some(3),
+            center_x: 80.0,
+            hd: Some((10, 20)),
+            sent: Some(sent),
+            budget: Some(budget),
+        }
+    }
+
+    fn earth(sprites: &[Sprite]) -> &Sprite {
+        sprites.iter().find(|s| s.slot == 3).unwrap()
+    }
+
+    #[test]
+    fn redraws_never_starve_and_sizes_are_never_stale() {
+        let bodies = crate::data::load();
+        let scene = Scene::new();
+        let mut sent = std::collections::HashMap::new();
+        let budget = std::cell::Cell::new(REDRAW_BUDGET);
+        let mut cv = Canvas::new(160, 50);
+        let (_, s) = scene.render(&mut cv, &frame(&bodies, &sent, &budget, 0.0, 0.3));
+        assert!(
+            !earth(&s).keep && earth(&s).cols > 0,
+            "a close Earth is a big, cell-snapped image"
+        );
+        sent.insert(3, earth(&s).sent(0.0, (10, 20)));
+
+        // just drawn and the same size: only moved, even with budget to spare
+        budget.set(REDRAW_BUDGET);
+        let (_, s) = scene.render(&mut cv, &frame(&bodies, &sent, &budget, 0.01, 0.3));
+        assert!(earth(&s).keep);
+
+        // a busy frame with the picture overdue: redrawn anyway
+        budget.set(1);
+        let (_, s) = scene.render(&mut cv, &frame(&bodies, &sent, &budget, 1.0, 0.3));
+        assert!(!earth(&s).keep);
+        sent.insert(3, earth(&s).sent(1.0, (10, 20)));
+
+        // zooming in on a busy frame: the new size is drawn at once, quickly, at low resolution
+        budget.set(1);
+        let (_, s) = scene.render(&mut cv, &frame(&bodies, &sent, &budget, 1.01, 0.25));
+        let e = earth(&s);
+        assert!(!e.keep && e.low && (e.w as u64 * e.h as u64) <= ZOOM_PIXELS + 2_000);
     }
 }

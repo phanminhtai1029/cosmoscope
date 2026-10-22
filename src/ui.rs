@@ -87,6 +87,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         bodies: &app.bodies,
         jd: app.jd,
         spin_jd: app.spin_jd,
+        spin_rate: app.spin_rate(),
         t: app.t,
         cam: app.cam,
         selected: app.selected,
@@ -95,23 +96,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         // images would cover the help box, so bodies fall back to text while it is open
         hd: app.hd.filter(|_| !app.show_help),
         sent: Some(&app.sent),
+        budget: Some(&app.budget),
     };
+    app.budget.set(render::REDRAW_BUDGET);
     app.canvas.label_limit = (main.width - panel_w) as usize;
-    let (hits, sprites) = app.scene.render(&mut app.canvas, &frame);
+    let (hits, sprites) =
+        crate::profile::time("scene", || app.scene.render(&mut app.canvas, &frame));
     app.hits = hits;
     let redrawn: Vec<(u32, render::Sent)> = sprites
         .iter()
         .filter(|s| !s.keep)
-        .map(|s| {
-            (
-                s.slot,
-                render::Sent {
-                    w: s.w,
-                    h: s.h,
-                    t: app.t,
-                },
-            )
-        })
+        .map(|s| (s.slot, s.sent(app.t, app.hd.unwrap_or((1, 1)))))
         .collect();
     let space = Rect::new(main.x, main.y, main.width - panel_w, main.height);
     let cell = app.hd.unwrap_or((1, 1));
@@ -145,6 +140,7 @@ fn frame_for_card(app: &App, _w: u16) -> render::Frame<'_> {
         bodies: &app.bodies,
         jd: app.jd,
         spin_jd: app.spin_jd,
+        spin_rate: app.spin_rate(),
         t: app.t,
         cam: app.cam,
         selected: app.selected,
@@ -152,6 +148,7 @@ fn frame_for_card(app: &App, _w: u16) -> render::Frame<'_> {
         center_x: 0.0,
         hd: app.hd.filter(|_| !app.show_help),
         sent: Some(&app.sent),
+        budget: Some(&app.budget),
     }
 }
 
@@ -373,12 +370,11 @@ fn draw_panel(
             if app.focused == Some(i) {
                 render::render_minimap(&mut cv, card_frame, i);
             } else {
-                card = render::render_card(&mut cv, &app.scene, card_frame, i).and_then(|s| {
-                    let sent = (!s.keep).then_some(render::Sent {
-                        w: s.w,
-                        h: s.h,
-                        t: app.t,
-                    });
+                card = crate::profile::time("card", || {
+                    render::render_card(&mut cv, &app.scene, card_frame, i)
+                })
+                .and_then(|s| {
+                    let sent = (!s.keep).then(|| s.sent(app.t, app.hd.unwrap_or((1, 1))));
                     place(s, card_area, card_area, app.hd.unwrap_or((1, 1))).map(|p| (p, sent))
                 });
             }
@@ -409,6 +405,40 @@ fn place(s: Sprite, origin: Rect, clip: Rect, cell: (u32, u32)) -> Option<Placed
     );
     let (cx0, cy0) = (clip.x as i64 * cw, clip.y as i64 * ch);
     let (cx1, cy1) = (clip.right() as i64 * cw, clip.bottom() as i64 * ch);
+    if s.cols > 0 {
+        // terminal-scaled image on whole cells: crop in cells, map the crop to image pixels
+        let (c0, r0) = (ax / cw, ay / ch);
+        let (k0, k1) = (c0.max(cx0 / cw), (c0 + s.cols as i64).min(cx1 / cw));
+        let (q0, q1) = (r0.max(cy0 / ch), (r0 + s.rows as i64).min(cy1 / ch));
+        if k0 >= k1 || q0 >= q1 {
+            return None;
+        }
+        let (fx, fy) = (s.w as f64 / s.cols as f64, s.h as f64 / s.rows as f64);
+        let sx0 = ((k0 - c0) as f64 * fx).round() as u32;
+        let sy0 = ((q0 - r0) as f64 * fy).round() as u32;
+        let sx1 = (((k1 - c0) as f64 * fx).round() as u32).min(s.w);
+        let sy1 = (((q1 - r0) as f64 * fy).round() as u32).min(s.h);
+        return Some(Placed {
+            slot: s.slot,
+            col: k0 as u16,
+            row: q0 as u16,
+            x_off: 0,
+            y_off: 0,
+            src: (
+                sx0,
+                sy0,
+                sx1.saturating_sub(sx0).max(1),
+                sy1.saturating_sub(sy0).max(1),
+            ),
+            cols: (k1 - k0) as u32,
+            rows: (q1 - q0) as u32,
+            w: s.w,
+            h: s.h,
+            rgba: s.rgba,
+            keep: s.keep,
+            z: s.z,
+        });
+    }
     let (sx0, sy0) = ((cx0 - ax).max(0), (cy0 - ay).max(0));
     let (sx1, sy1) = ((cx1 - ax).min(s.w as i64), (cy1 - ay).min(s.h as i64));
     if sx1 <= sx0 || sy1 <= sy0 {
@@ -427,6 +457,8 @@ fn place(s: Sprite, origin: Rect, clip: Rect, cell: (u32, u32)) -> Option<Placed
             (sx1 - sx0) as u32,
             (sy1 - sy0) as u32,
         ),
+        cols: 0,
+        rows: 0,
         w: s.w,
         h: s.h,
         rgba: s.rgba,
@@ -566,6 +598,9 @@ mod tests {
             rgba: vec![0; (w * h * 4) as usize],
             keep: false,
             z: 1,
+            cols: 0,
+            rows: 0,
+            low: false,
         }
     }
 
@@ -595,6 +630,27 @@ mod tests {
         .unwrap();
         assert_eq!((p.col, p.row, p.x_off, p.y_off), (0, 0, 0, 0));
         assert_eq!(p.src, (6, 4, 14, 16));
+    }
+
+    #[test]
+    fn scaled_sprites_crop_in_whole_cells() {
+        // a 4x2-cell image rendered at 20x10 pixels, starting at cell 9; the clip ends at cell 12
+        let s = Sprite {
+            x: 90.0,
+            y: 20.0,
+            cols: 4,
+            rows: 2,
+            ..sprite(0.0, 0.0, 20, 10)
+        };
+        let p = place(
+            s,
+            Rect::new(0, 0, 20, 10),
+            Rect::new(0, 0, 12, 10),
+            (10, 20),
+        )
+        .unwrap();
+        assert_eq!((p.col, p.row, p.cols, p.rows, p.x_off), (9, 1, 3, 2, 0));
+        assert_eq!(p.src, (0, 0, 15, 10));
     }
 
     #[test]

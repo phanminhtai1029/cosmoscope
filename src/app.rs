@@ -5,7 +5,7 @@ use ratatui::crossterm::event::{
 };
 
 use crate::data::{self, Body};
-use crate::math::V3;
+use crate::math::{smoothstep, V3};
 use crate::render::{body_position, body_radius, has_rings, Camera, Canvas, Hit, Scene};
 use crate::time;
 
@@ -65,6 +65,7 @@ pub struct App {
     pub selected: usize,
     pub focused: Option<usize>,
     pub cam: Camera,
+    vel: CameraVel,
     goal_az: f64,
     goal_el: f64,
     system_dist: f64,
@@ -89,7 +90,27 @@ pub struct App {
     pub images: Vec<crate::kitty::Placed>,
     /// Last redraw of each image slot.
     pub sent: std::collections::HashMap<u32, crate::render::Sent>,
+    /// Redraw budget for the frame being drawn.
+    pub budget: std::cell::Cell<u64>,
     pub quit: bool,
+}
+
+/// Rates of change of the camera parameters, for the spring motion.
+#[derive(Clone, Copy, Default)]
+struct CameraVel {
+    target: V3,
+    log_dist: f64,
+    az: f64,
+    el: f64,
+}
+
+/// One step of a critically damped spring towards `goal` with natural frequency `w` (exact
+/// solution, stable at any frame rate). Returns the new value and velocity.
+fn spring(x: f64, v: f64, goal: f64, w: f64, dt: f64) -> (f64, f64) {
+    let d = x - goal;
+    let e = (-w * dt).exp();
+    let k = (v + w * d) * dt;
+    (goal + (d + k) * e, (v - w * k) * e)
 }
 
 #[derive(Clone, Copy)]
@@ -118,6 +139,7 @@ impl App {
                 az: -2.6,
                 el: 1.25,
             },
+            vel: CameraVel::default(),
             goal_az: -1.75,
             goal_el: SYSTEM_EL,
             system_dist: SYSTEM_DIST,
@@ -136,7 +158,17 @@ impl App {
             hd: None,
             images: Vec::new(),
             sent: std::collections::HashMap::new(),
+            budget: std::cell::Cell::new(u64::MAX),
             quit: false,
+        }
+    }
+
+    /// Days of planet spin per real second (spin never runs faster than an hour per second).
+    pub fn spin_rate(&self) -> f64 {
+        if self.paused {
+            0.0
+        } else {
+            SPEEDS[self.speed].0.min(1.0 / 24.0)
         }
     }
 
@@ -166,9 +198,6 @@ impl App {
         if self.auto_rotate && self.drag.is_none() {
             self.goal_az += if self.focused.is_some() { 0.02 } else { 0.035 } * dt;
         }
-        let k = 1.0 - (-dt * 2.6).exp();
-        self.cam.az += (self.goal_az - self.cam.az) * k;
-        self.cam.el += (self.goal_el - self.cam.el) * k;
         let (target, dist) = match self.focused {
             Some(i) => {
                 self.focus_age += dt;
@@ -184,14 +213,34 @@ impl App {
             }
             None => (V3::ZERO, self.system_dist),
         };
-        // ease the target in, then lock on so a fast-moving planet stays centred
-        let kt = if self.focused.is_some() && self.focus_age > 1.5 {
-            1.0
+        // Every camera parameter follows its goal like a critically damped spring: it speeds up
+        // gently, glides, and settles without overshoot, so zooms and fly-ins never jerk.
+        // The target moves first and the zoom follows more slowly, so a fly-in turns towards
+        // the body before closing in and never sweeps through the Sun. While focused, the
+        // target spring stiffens so a fast-moving planet stays centred.
+        let w_target = if self.focused.is_some() {
+            3.5 + 20.0 * smoothstep(1.0, 3.0, self.focus_age)
         } else {
-            1.0 - (-dt * 3.0).exp()
+            3.0
         };
-        self.cam.target = self.cam.target.lerp(target, kt);
-        self.cam.dist = (self.cam.dist.ln() + (dist.ln() - self.cam.dist.ln()) * k).exp();
+        let (az, vaz) = spring(self.cam.az, self.vel.az, self.goal_az, 3.0, dt);
+        let (el, vel) = spring(self.cam.el, self.vel.el, self.goal_el, 3.0, dt);
+        let (ld, vld) = spring(self.cam.dist.ln(), self.vel.log_dist, dist.ln(), 2.4, dt);
+        let (tx, vx) = spring(self.cam.target.x, self.vel.target.x, target.x, w_target, dt);
+        let (ty, vy) = spring(self.cam.target.y, self.vel.target.y, target.y, w_target, dt);
+        let (tz, vz) = spring(self.cam.target.z, self.vel.target.z, target.z, w_target, dt);
+        self.cam = Camera {
+            target: V3::new(tx, ty, tz),
+            dist: ld.exp(),
+            az,
+            el,
+        };
+        self.vel = CameraVel {
+            target: V3::new(vx, vy, vz),
+            log_dist: vld,
+            az: vaz,
+            el: vel,
+        };
         if self.t - self.fact_since > FACT_SECONDS {
             self.next_fact();
         }
@@ -389,6 +438,48 @@ impl App {
             } else {
                 self.select(i);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fly to Earth and back at 30 fps and check that the camera never jumps between frames.
+    #[test]
+    fn camera_moves_smoothly_in_and_out() {
+        let mut app = App::new(time::parse_date("2026-10-22").unwrap());
+        let dt = 1.0 / 30.0;
+        for _ in 0..90 {
+            app.update(dt); // settle the intro
+        }
+        let mut prev = app.cam;
+        let check = |prev: &Camera, now: &Camera, step: usize| {
+            let zoom = (now.dist / prev.dist).ln().abs();
+            let slide = (now.target - prev.target).len() / now.dist;
+            assert!(
+                zoom < 0.12,
+                "frame {step}: distance jumped by {:.0}%",
+                zoom * 100.0
+            );
+            assert!(
+                slide < 0.12,
+                "frame {step}: target jumped by {:.0}% of the view",
+                slide * 100.0
+            );
+        };
+        app.focus(3);
+        for step in 0..180 {
+            app.update(dt);
+            check(&prev, &app.cam, step);
+            prev = app.cam;
+        }
+        app.unfocus();
+        for step in 180..300 {
+            app.update(dt);
+            check(&prev, &app.cam, step);
+            prev = app.cam;
         }
     }
 }
