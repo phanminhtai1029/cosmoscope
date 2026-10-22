@@ -56,7 +56,7 @@ irm https://raw.githubusercontent.com/phanminhtai1029/cosmoscope/main/install/in
 The binary goes to `%LOCALAPPDATA%\Programs\cosmoscope` and is added to your user `PATH`. Open a new terminal afterwards. [Windows Terminal](https://aka.ms/terminal) is recommended.
 
 ### With Cargo
-If you have Rust 1.85 or newer:
+If you have Rust 1.88 or newer:
 ```bash
 cargo install --git https://github.com/phanminhtai1029/cosmoscope
 ```

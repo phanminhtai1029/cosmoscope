@@ -2,7 +2,7 @@
 name = "cosmoscope"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A living, interactive Solar System in your terminal: real planet positions, time travel and planet deep dives"
 license = "MIT"
 repository = "https://github.com/phanminhtai1029/cosmoscope"
