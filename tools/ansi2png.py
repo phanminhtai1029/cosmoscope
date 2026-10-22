@@ -13,6 +13,8 @@ BG = (11, 12, 20)
 FONTS = ["/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/System/Library/Fonts/Menlo.ttc",
          "C:/Windows/Fonts/consola.ttf"]
 TOKEN = re.compile(r"\x1b\[([0-9;]*)m|(.)")
+QUADS = {c: m for m, c in enumerate(" ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█") if m}
+QUADS.pop("▀"); QUADS.pop("▄")
 BRAILLE = [(0, 0, 0x01), (0, 1, 0x02), (0, 2, 0x04), (1, 0, 0x08), (1, 1, 0x10), (1, 2, 0x20), (0, 3, 0x40), (1, 3, 0x80)]
 
 
@@ -77,10 +79,17 @@ def main(src, dst, bg=BG):
                 d.rectangle([X, Y, X + CW - 1, Y + CH - 1], fill=bg)
             col = fg or (200, 200, 200)
             o = ord(ch)
-            if ch == "▀":
+            if ch == "▌" and bg:
+                d.rectangle([X, Y, X + CW // 2 - 1, Y + CH - 1], fill=col)
+            elif ch == "▀":
                 d.rectangle([X, Y, X + CW - 1, Y + CH // 2 - 1], fill=col)
             elif ch == "▄":
                 d.rectangle([X, Y + CH // 2, X + CW - 1, Y + CH - 1], fill=col)
+            elif ch in QUADS:
+                for k in range(4):
+                    if QUADS[ch] & (1 << k):
+                        qx, qy = X + (k % 2) * CW // 2, Y + (k // 2) * CH // 2
+                        d.rectangle([qx, qy, qx + CW // 2 - 1, qy + CH // 2 - 1], fill=col)
             elif 0x2800 <= o <= 0x28FF:
                 bits = o - 0x2800
                 for cx, cy, b in BRAILLE:

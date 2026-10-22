@@ -1,5 +1,6 @@
 //! Software renderer. The scene is drawn into a cell grid with three layers:
-//! half-block "pixels" (two per cell) for the Sun and planets, braille dots (2x4 per cell)
+//! block "pixels" (2x2 per cell, shown with half-block and quadrant glyphs) for the Sun and
+//! planets, braille dots (2x4 per cell)
 //! for orbits and small particles, and plain glyphs for the sky. Empty cells keep the
 //! terminal's own background, so transparent terminals stay transparent.
 
@@ -43,7 +44,7 @@ impl Canvas {
         Canvas {
             w,
             h,
-            px: vec![None; n * 2],
+            px: vec![None; n * 4],
             dots: vec![0; n],
             dot_col: vec![(Rgb::BLACK, 0.0); n],
             glyph: vec![None; n],
@@ -68,12 +69,12 @@ impl Canvas {
         self.haze.fill(0.0);
     }
 
-    /// Set a half-block pixel (x in 0..w, y in 0..2h) if it is nearer than what is there.
+    /// Set a block pixel (x in 0..2w, y in 0..2h) if it is nearer than what is there.
     fn pixel(&mut self, x: i64, y: i64, col: Rgb, depth: f64) {
-        if x < 0 || y < 0 || x >= self.w as i64 || y >= 2 * self.h as i64 {
+        if x < 0 || y < 0 || x >= 2 * self.w as i64 || y >= 2 * self.h as i64 {
             return;
         }
-        let i = y as usize * self.w + x as usize;
+        let i = y as usize * 2 * self.w + x as usize;
         if self.px[i].is_none_or(|(_, d)| depth < d) {
             self.px[i] = Some((col, depth));
         }
@@ -124,10 +125,7 @@ impl Canvas {
         }
         let row = y as usize * self.w;
         let blocked = |cx: i64| {
-            let c = cx as usize;
-            self.label[row + c].is_some()
-                || self.px[2 * row + c].is_some()
-                || self.px[2 * row + self.w + c].is_some()
+            self.label[row + cx as usize].is_some() || self.quad(cx as usize, y as usize).0 != 0
         };
         if (x..x + n).any(blocked) {
             return false;
@@ -138,33 +136,62 @@ impl Canvas {
         true
     }
 
+    /// The four block pixels of a cell (top-left, top-right, bottom-left, bottom-right)
+    /// and a bit mask of which are set.
+    fn quad(&self, x: usize, y: usize) -> (u8, [Option<Rgb>; 4]) {
+        let top = 2 * y * 2 * self.w + 2 * x;
+        let bot = top + 2 * self.w;
+        let q = [
+            self.px[top],
+            self.px[top + 1],
+            self.px[bot],
+            self.px[bot + 1],
+        ]
+        .map(|p| p.map(|(c, _)| c));
+        let mask = q
+            .iter()
+            .enumerate()
+            .fold(0u8, |m, (k, p)| m | ((p.is_some() as u8) << k));
+        (mask, q)
+    }
+
     pub fn cell(&self, x: usize, y: usize) -> Cell {
         let i = y * self.w + x;
-        let top = self.px[(2 * y) * self.w + x];
-        let bot = self.px[(2 * y + 1) * self.w + x];
-        match (top, bot) {
-            (Some((t, _)), Some((b, _))) => {
-                return Cell {
+        let (mask, q) = self.quad(x, y);
+        if mask == 15 {
+            // fully covered: split the cell along whichever axis keeps more detail
+            let [tl, tr, bl, br] = q.map(|c| c.unwrap_or_default());
+            let (top, bot) = (tl.mix(tr, 0.5), bl.mix(br, 0.5));
+            let (left, right) = (tl.mix(bl, 0.5), tr.mix(br, 0.5));
+            let diff = |a: Rgb, b: Rgb| (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs();
+            return if diff(left, right) > diff(top, bot) * 1.3 {
+                Cell {
+                    ch: '▌',
+                    fg: Some(left),
+                    bg: Some(right),
+                }
+            } else {
+                Cell {
                     ch: '▀',
-                    fg: Some(t),
-                    bg: Some(b),
+                    fg: Some(top),
+                    bg: Some(bot),
                 }
-            }
-            (Some((t, _)), None) => {
-                return Cell {
-                    ch: '▀',
-                    fg: Some(t),
-                    bg: None,
-                }
-            }
-            (None, Some((b, _))) => {
-                return Cell {
-                    ch: '▄',
-                    fg: Some(b),
-                    bg: None,
-                }
-            }
-            _ => {}
+            };
+        }
+        if mask != 0 {
+            // an edge: quadrant glyphs trace the outline at twice the horizontal resolution,
+            // over the terminal's own background
+            const QUADS: [char; 16] = [
+                ' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█',
+            ];
+            let set: Vec<Rgb> = q.iter().flatten().copied().collect();
+            let k = 1.0 / set.len() as f64;
+            let fg = set.iter().fold(Rgb::BLACK, |a, c| a.add(c.scale(k)));
+            return Cell {
+                ch: QUADS[mask as usize],
+                fg: Some(fg),
+                bg: None,
+            };
         }
         if let Some((ch, col)) = self.label[i] {
             return Cell {
@@ -815,22 +842,34 @@ fn draw_body(cv: &mut Canvas, view: &View, fr: &Frame, i: usize, pos: V3) -> Opt
     let l_dot_a = sun_dir.dot(axis);
     let lit_face = (l_dot_a > 0.0) == (ax_c.z > 0.0);
 
-    let (x0, x1) = ((pcx - reach).floor() as i64, (pcx + reach).ceil() as i64);
+    // pixels are half a cell wide: x counts in half cells, y in half rows
+    let (x0, x1) = (
+        (2.0 * (pcx - reach)).floor() as i64,
+        (2.0 * (pcx + reach)).ceil() as i64,
+    );
     let (y0, y1) = ((pcy - reach).floor() as i64, (pcy + reach).ceil() as i64);
+    let (inner, outer) = ((1.0 - 1.2 / sr).max(0.0).powi(2), (1.0 + 1.2 / sr).powi(2));
     for py in y0..=y1 {
         for px in x0..=x1 {
-            let mut u = (px as f64 + 0.5 - pcx) / sr;
+            let mut u = ((px as f64 + 0.5) * 0.5 - pcx) / sr;
             let mut v = -(py as f64 + 0.5 - pcy) / sr;
-            // 4x4 coverage test so small discs come out round instead of as a cross
-            let mut inside = 0;
-            for sy in 0..4 {
-                for sx in 0..4 {
-                    let su = (px as f64 + (sx as f64 + 0.5) / 4.0 - pcx) / sr;
-                    let sv = -(py as f64 + (sy as f64 + 0.5) / 4.0 - pcy) / sr;
-                    inside += (su * su + sv * sv <= 1.0) as u32;
+            let c2 = u * u + v * v;
+            // 4x4 coverage test near the rim so small discs come out round
+            let on_planet = if c2 < inner {
+                true
+            } else if c2 > outer {
+                false
+            } else {
+                let mut inside = 0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let su = ((px as f64 + (sx as f64 + 0.5) / 4.0) * 0.5 - pcx) / sr;
+                        let sv = -(py as f64 + (sy as f64 + 0.5) / 4.0 - pcy) / sr;
+                        inside += (su * su + sv * sv <= 1.0) as u32;
+                    }
                 }
-            }
-            let on_planet = inside >= 8;
+                inside >= 8
+            };
             let mut d2 = u * u + v * v;
             if on_planet && d2 > 0.97 {
                 // an edge pixel whose centre falls just outside: shade it at the rim
@@ -850,7 +889,9 @@ fn draw_body(cv: &mut Canvas, view: &View, fr: &Frame, i: usize, pos: V3) -> Opt
                         .mix(Rgb::hex(0xfff3d0), wp.powf(0.45))
                         .scale(0.86 + 0.22 * gran)
                 } else {
-                    let tex = surface(id, to_body(n), fr.t);
+                    // small discs keep only their broad colours; fine texture there reads as noise
+                    let tex = surface(id, to_body(n), fr.t)
+                        .mix(body.rgb(), 0.75 * (1.0 - smoothstep(4.0, 12.0, sr)));
                     let ndl = n.dot(sun_dir);
                     let mut lit = (ndl * 1.15 + 0.05).clamp(0.0, 1.0).powf(0.85);
                     if has_ring && l_dot_a.abs() > 1e-3 {
@@ -893,6 +934,9 @@ fn draw_body(cv: &mut Canvas, view: &View, fr: &Frame, i: usize, pos: V3) -> Opt
                         } else {
                             0.12 + 1.4 * tau * (-2.5 * tau).exp()
                         };
+                        // at icon size the ring is lit generously so it reads as Saturn's ring,
+                        // not as two dark specks beside the planet
+                        let light = light.max(0.95 * (1.0 - smoothstep(5.0, 9.0, sr)));
                         let ring_col = rc.scale(alb * light * shadow);
                         col = match col {
                             Some(c) => Some(c.mix(ring_col, alpha)),
